@@ -49,6 +49,195 @@ function makeUI({ initialSnapshot = snapshot() } = {}) {
   return {dom,callbacks,sends,opens,actions,history,input,type,submit};
 }
 
+function observeComposerFocus(ui) {
+  ui.input.focus();
+  const originalFocus = ui.input.focus.bind(ui.input);
+  let calls = 0;
+  ui.input.focus = (...args) => { calls += 1; return originalFocus(...args); };
+  return { get calls() { return calls; } };
+}
+
+function pressEnter(ui) {
+  ui.input.dispatchEvent(new ui.dom.window.KeyboardEvent('keydown', {
+    key: 'Enter', bubbles: true, cancelable: true
+  }));
+}
+
+function blurDisabledComposer(ui) {
+  assert.equal(ui.input.disabled, true, 'the send gate disabled the composer');
+  // Chromium drops focus to the document on disable. JSDOM also ignores blur()
+  // on a disabled textarea, so explicitly reproduce that document focus state.
+  const body = ui.dom.window.document.body;
+  const previousTabIndex = body.getAttribute('tabindex');
+  body.tabIndex = -1;
+  body.focus();
+  if (previousTabIndex === null) body.removeAttribute('tabindex');
+  else body.setAttribute('tabindex', previousTabIndex);
+  assert.notStrictEqual(ui.dom.window.document.activeElement, ui.input);
+}
+
+test('composer focus waits for the backend sending gate and restores exactly once', async () => {
+  const ui = makeUI();
+  try {
+    const focus = observeComposerFocus(ui);
+    ui.type('첫 번째 메시지');
+    pressEnter(ui);
+    assert.equal(ui.sends.length, 1);
+    ui.callbacks.state({ sending: true });
+    blurDisabledComposer(ui);
+    ui.sends[0].resolve({ ok: true });
+    await tick();
+    assert.equal(ui.input.value, '');
+    assert.equal(ui.input.disabled, true, 'the renderer receipt can precede backend readiness');
+    assert.equal(focus.calls, 0, 'a disabled input must not receive a focus attempt');
+
+    ui.callbacks.state({ sending: false });
+    await tick();
+    assert.equal(ui.input.disabled, false);
+    assert.strictEqual(ui.dom.window.document.activeElement, ui.input);
+    assert.equal(focus.calls, 1);
+
+    ui.callbacks.state({ sending: false });
+    ui.callbacks.snapshot(snapshot());
+    await tick();
+    assert.equal(focus.calls, 1, 'subsequent updates do not repeat the focus restoration');
+  } finally { ui.dom.window.close(); }
+});
+
+test('composer focus waits for a stale native draft snapshot to clear after success', async () => {
+  const ui = makeUI();
+  try {
+    const focus = observeComposerFocus(ui);
+    ui.type('전송 직후 남아 있는 원래 입력창 내용');
+    pressEnter(ui);
+    ui.callbacks.snapshot({ ...snapshot(), draftText: ui.sends[0].payload.text });
+    blurDisabledComposer(ui);
+    ui.sends[0].resolve({ ok: true });
+    await tick();
+    assert.equal(ui.input.value, '');
+    assert.equal(ui.input.disabled, true);
+    assert.equal(focus.calls, 0);
+
+    ui.callbacks.snapshot(snapshot());
+    await tick();
+    assert.equal(ui.input.disabled, false);
+    assert.strictEqual(ui.dom.window.document.activeElement, ui.input);
+    assert.equal(focus.calls, 1);
+    ui.callbacks.snapshot(snapshot());
+    assert.equal(focus.calls, 1);
+  } finally { ui.dom.window.close(); }
+});
+
+test('composer focus cannot survive a conversation change or account reset before readiness', async () => {
+  for (const transition of ['conversation', 'account']) {
+    const ui = makeUI();
+    try {
+      const focus = observeComposerFocus(ui);
+      ui.type('이전 화면에서 보낸 메시지');
+      pressEnter(ui);
+      ui.callbacks.state({ sending: true });
+      blurDisabledComposer(ui);
+      ui.sends[0].resolve({ ok: true });
+      await tick();
+
+      if (transition === 'conversation') {
+        ui.callbacks.snapshot(snapshot(routeB));
+        ui.callbacks.snapshot(snapshot(routeA));
+      } else {
+        ui.callbacks.snapshot({ ...snapshot(), reset: true });
+      }
+      ui.callbacks.state({ sending: false });
+      await tick();
+      assert.equal(ui.input.disabled, false, transition);
+      assert.equal(focus.calls, 0, transition + ' cancels the previous focus request');
+      assert.notStrictEqual(ui.dom.window.document.activeElement, ui.input, transition);
+    } finally { ui.dom.window.close(); }
+  }
+});
+
+test('composer focus is cancelled when native mode or help is opened before readiness', async () => {
+  for (const transition of ['native-state', 'native-action', 'help']) {
+    const ui = makeUI();
+    try {
+      const document = ui.dom.window.document;
+      const focus = observeComposerFocus(ui);
+      ui.type('화면을 바꾸기 전에 보낸 메시지');
+      pressEnter(ui);
+      ui.callbacks.state({ sending: true });
+      blurDisabledComposer(ui);
+      ui.sends[0].resolve({ ok: true });
+      await tick();
+
+      if (transition === 'native-state') {
+        ui.callbacks.state({ mode: 'native' });
+        ui.callbacks.state({ mode: 'code' });
+      } else if (transition === 'native-action') {
+        const button = document.getElementById('mode');
+        button.dispatchEvent(new ui.dom.window.Event('pointerdown', { bubbles: true }));
+        button.click();
+        assert.ok(ui.actions.includes('toggle-mode'));
+      } else {
+        document.getElementById('tab-home').click();
+        assert.equal(document.getElementById('composer-area').hidden, true);
+      }
+      ui.callbacks.state({ sending: false });
+      await tick();
+
+      if (transition === 'help') {
+        const conversation = [...document.querySelectorAll('.file-row.subfile')]
+          .find(element => element.dataset.focusKey === routeA);
+        conversation.click();
+        await tick();
+      }
+      assert.equal(ui.input.disabled, false, transition + ' has returned to a usable composer');
+      assert.equal(focus.calls, 0, transition + ' cancels delayed focus');
+      assert.notStrictEqual(document.activeElement, ui.input, transition);
+    } finally { ui.dom.window.close(); }
+  }
+});
+
+test('composer focus does not steal focus from another control while a send becomes ready', async () => {
+  const ui = makeUI();
+  try {
+    const document = ui.dom.window.document;
+    const focus = observeComposerFocus(ui);
+    ui.type('보내고 다른 버튼으로 이동');
+    pressEnter(ui);
+    ui.callbacks.state({ sending: true });
+    blurDisabledComposer(ui);
+    ui.sends[0].resolve({ ok: true });
+    await tick();
+    const otherControl = document.getElementById('file-names-toggle');
+    otherControl.focus();
+    ui.callbacks.state({ sending: false });
+    ui.callbacks.snapshot(snapshot());
+    await tick();
+    assert.strictEqual(document.activeElement, otherControl);
+    assert.equal(focus.calls, 0);
+  } finally { ui.dom.window.close(); }
+});
+
+test('two ordinary Enter sends keep the composer ready without another click or focus call', async () => {
+  const ui = makeUI();
+  try {
+    const focus = observeComposerFocus(ui);
+    for (const [index, message] of ['첫 번째', '두 번째'].entries()) {
+      assert.strictEqual(ui.dom.window.document.activeElement, ui.input);
+      ui.type(message);
+      pressEnter(ui);
+      assert.equal(ui.sends.length, index + 1);
+      assert.equal(ui.sends[index].payload.text, message);
+      blurDisabledComposer(ui);
+      ui.sends[index].resolve({ ok: true });
+      await tick();
+      assert.equal(ui.input.value, '');
+      assert.equal(ui.input.disabled, false);
+      assert.strictEqual(ui.dom.window.document.activeElement, ui.input);
+    }
+    assert.equal(focus.calls, 2, 'each completed send restores focus once');
+  } finally { ui.dom.window.close(); }
+});
+
 test('real snapshot renders as safe code and real Explorer filenames', async () => {
   const ui = makeUI();
   try {

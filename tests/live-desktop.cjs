@@ -5,8 +5,10 @@ const { app, BrowserWindow, session } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
+const { createFileLogger } = require('./helpers/file-logger.cjs');
 const artifactDir = process.env.VDC_TEST_OUTPUT || path.resolve(__dirname, '../test-results/live-desktop');
 fs.mkdirSync(artifactDir, { recursive:true });
+const logger = createFileLogger(path.join(artifactDir, 'test.log'));
 app.disableHardwareAcceleration();
 process.env.VDC_TEST_PROFILE = path.join(artifactDir, 'profile');
 const route = '/channels/@me/123';
@@ -37,7 +39,9 @@ app.whenReady().then(() => {
 });
 require('../main');
 const delay = ms => new Promise(resolve => setTimeout(resolve,ms));
-const timer = setTimeout(() => { console.error('Live integration timed out'); app.exit(1); },45000);
+const timer = setTimeout(() => {
+  try { logger.error('Live integration timed out'); } finally { app.exit(1); }
+},45000);
 async function until(predicate, duration=15000) {
   const start=Date.now();
   while(Date.now()-start<duration) { try { const value=await predicate(); if(value)return value; } catch {} await delay(100); }
@@ -67,13 +71,15 @@ app.whenReady().then(async () => {
     assert.equal(await host.executeJavaScript('document.getElementById("file-names-toggle").getAttribute("aria-pressed")'),'true');
     await host.executeJavaScript(`document.getElementById('file-names-toggle').click();`,true);
     assert.equal(await host.executeJavaScript('document.getElementById("tab-label").textContent'),'테스트 친구.tsx');
-    console.log('PASS: Explorer aliases match tab, persist through renderer reload, and toggle back');
+    logger.log('PASS: Explorer aliases match tab, persist through renderer reload, and toggle back');
     fs.writeFileSync(path.join(artifactDir,'live-editor-before-send.png'),(await host.capturePage()).toPNG());
     await until(()=>host.executeJavaScript('!document.getElementById("message-input").disabled'));
     await host.executeJavaScript('window.__historyNode = document.querySelector(".code-block[data-message-id=\\"chat-messages-123-900\\"]");');
     win.focus();host.focus();await until(()=>win.isFocused());
     const message='한글 전송 검사 "따옴표" <b>문자</b>';
-    await host.executeJavaScript(`const input=document.getElementById('message-input');input.value=${JSON.stringify(message)};input.dispatchEvent(new Event('input',{bubbles:true}));document.getElementById('composer').requestSubmit();`,true);
+    await host.executeJavaScript(`const input=document.getElementById('message-input');input.value=${JSON.stringify(message)};input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();`,true);
+    host.sendInputEvent({type:'keyDown',keyCode:'Return'});
+    host.sendInputEvent({type:'keyUp',keyCode:'Return'});
     await until(()=>guest.executeJavaScript('window.__sentTexts.length===1'));
     await until(()=>host.executeJavaScript('document.getElementById("message-input").value===""'));
     assert.equal(await guest.executeJavaScript('window.__sentTexts[0]'),message);
@@ -81,7 +87,13 @@ app.whenReady().then(async () => {
     const displayedMessage=JSON.stringify(message).slice(1,-1);
     await until(()=>host.executeJavaScript(`document.getElementById('code-content').textContent.includes(${JSON.stringify(displayedMessage)})`));
     assert.equal(await host.executeJavaScript('!!document.getElementById("code-content").querySelector("b")'),false);
-    console.log('PASS: code input -> native insertText/Enter -> acknowledged message -> code rendering');
+    logger.log('PASS: code input -> native insertText/Enter -> acknowledged message -> code rendering');
+    await until(()=>host.executeJavaScript('!document.getElementById("message-input").disabled && document.activeElement===document.getElementById("message-input") && document.hasFocus()'));
+    // Type the next draft without another click or focus call in either process.
+    await host.insertText('클릭 없이 이어서 쓰는 다음 메시지');
+    assert.equal(await host.executeJavaScript('document.getElementById("message-input").value'),'클릭 없이 이어서 쓰는 다음 메시지');
+    await host.executeJavaScript(`document.getElementById('message-input').value='';document.getElementById('message-input').dispatchEvent(new Event('input',{bubbles:true}));`);
+    logger.log('PASS: Enter send restores the enabled composer and accepts the next draft without clicking');
     assert.equal(await host.executeJavaScript('document.querySelectorAll(".live-message[data-message-id=\\"chat-messages-123-901\\"] .code-row").length'),1);
     await guest.executeJavaScript(`{
       const row=document.createElement('li');row.id='chat-messages-123-902';
@@ -100,7 +112,7 @@ app.whenReady().then(async () => {
     await until(()=>host.executeJavaScript('document.getElementById("tab-label").textContent==="테스트 친구.tsx"'));
     assert.equal(await host.executeJavaScript('document.querySelectorAll(".live-message").length'),0);
     assert.equal(await host.executeJavaScript('document.querySelectorAll(".code-block[data-message-id]").length'),3);
-    console.log('PASS: live incoming/outgoing messages occupy one line each; reentry restores woven history');
+    logger.log('PASS: live incoming/outgoing messages occupy one line each; reentry restores woven history');
 
     const wrong=await host.executeJavaScript(`window.vdc.sendMessage({text:'보내면 안 됨',route:'/channels/@me/456'})`,true);
     assert.equal(wrong.ok,false);
@@ -111,7 +123,7 @@ app.whenReady().then(async () => {
     assert.equal(await guest.executeJavaScript(`document.querySelector('[data-slate-editor]').textContent`),'원래 창 초안');
     assert.equal(await guest.executeJavaScript('window.__sentTexts.length'),1);
     await guest.executeJavaScript(`document.querySelector('[data-slate-editor]').textContent='';`);
-    console.log('PASS: wrong conversation and existing native draft cannot be sent over');
+    logger.log('PASS: wrong conversation and existing native draft cannot be sent over');
 
     // A real iframe navigation starts the aggregate loading spinner without
     // replacing the Discord document or invalidating its pending send receipt.
@@ -128,7 +140,7 @@ app.whenReady().then(async () => {
     assert.equal(await guest.executeJavaScript('window.__enterCount'),2);
     guest.removeListener('did-start-navigation',observeFrame);
     await guest.executeJavaScript(`window.__delayAck=0;document.getElementById('loading-embed').remove();`);
-    console.log('PASS: real embedded-frame navigation preserves the active send and its acknowledgement');
+    logger.log('PASS: real embedded-frame navigation preserves the active send and its acknowledgement');
 
     await host.executeJavaScript(`window.vdc.action('toggle-mode')`,true);
     assert.equal(view.getBounds().x,0);
@@ -138,7 +150,7 @@ app.whenReady().then(async () => {
     fs.writeFileSync(path.join(artifactDir,'live-editor-fixture.png'),(await host.capturePage()).toPNG());
     await host.executeJavaScript(`document.getElementById('file-names-toggle').click();`,true);
     fs.writeFileSync(path.join(artifactDir,'live-file-names.png'),(await host.capturePage()).toPNG());
-    console.log('PASS: full code UI and original Discord view toggle');
+    logger.log('PASS: full code UI and original Discord view toggle');
     let backgroundReads=0;
     const originalExecute=guest.executeJavaScriptInIsolatedWorld.bind(guest);
     guest.executeJavaScriptInIsolatedWorld=(world,scripts,...args)=>{
@@ -150,7 +162,7 @@ app.whenReady().then(async () => {
     assert.equal(backgroundReads,0,'periodic Discord scans pause while minimized');
     win.restore();await until(()=>backgroundReads>0);
     guest.executeJavaScriptInIsolatedWorld=originalExecute;
-    console.log('PASS: historical DOM is retained for new messages and minimized scans resume on restore');
+    logger.log('PASS: historical DOM is retained for new messages and minimized scans resume on restore');
 
     await host.executeJavaScript(`window.__rendererReloadSentinel=true;document.getElementById('message-input').value='새로고침에도 보존할 초안';document.getElementById('message-input').dispatchEvent(new Event('input',{bubbles:true}));`);
     let mainReloads=0;
@@ -164,17 +176,20 @@ app.whenReady().then(async () => {
     assert.equal(await host.executeJavaScript('window.__rendererReloadSentinel'),true);
     assert.equal(await host.executeJavaScript('document.getElementById("message-input").value'),'새로고침에도 보존할 초안');
     guest.removeListener('did-start-navigation',observeReload);
-    console.log('PASS: standard reload shortcut refreshes Discord while preserving the code renderer and draft');
+    logger.log('PASS: standard reload shortcut refreshes Discord while preserving the code renderer and draft');
     clearTimeout(timer);app.exit(0);
   } catch(error) {
-    console.error(error);
-    const failedWindow=BrowserWindow.getAllWindows()[0];
-    if(failedWindow) {
-      console.error('Window:',JSON.stringify({visible:failedWindow.isVisible(),minimized:failedWindow.isMinimized(),focused:failedWindow.isFocused()}));
-      console.error('Rendered:',await failedWindow.webContents.executeJavaScript('JSON.stringify({live:document.querySelectorAll(".live-message").length,status:document.getElementById("connection-status")?.textContent,error:document.getElementById("inline-status")?.textContent})').catch(()=>''));
-      const failedGuest=failedWindow.contentView.children[0]?.webContents;
-      if(failedGuest&&!failedGuest.isDestroyed())console.error('Guest fixture:',await failedGuest.executeJavaScriptInIsolatedWorld(1001,[{code:'JSON.stringify(window.__vdcAdapter?.snapshot())'}]).catch(()=>''));
+    try {
+      logger.error(error);
+      const failedWindow=BrowserWindow.getAllWindows()[0];
+      if(failedWindow&&!failedWindow.isDestroyed()) {
+        logger.error('Window:',JSON.stringify({visible:failedWindow.isVisible(),minimized:failedWindow.isMinimized(),focused:failedWindow.isFocused()}));
+        logger.error('Rendered:',await failedWindow.webContents.executeJavaScript('JSON.stringify({live:document.querySelectorAll(".live-message").length,status:document.getElementById("connection-status")?.textContent,error:document.getElementById("inline-status")?.textContent})').catch(()=>''));
+        const failedGuest=failedWindow.contentView.children[0]?.webContents;
+        if(failedGuest&&!failedGuest.isDestroyed())logger.error('Guest fixture:',await failedGuest.executeJavaScriptInIsolatedWorld(1001,[{code:'JSON.stringify(window.__vdcAdapter?.snapshot())'}]).catch(()=>''));
+      }
+    } finally {
+      clearTimeout(timer);app.exit(1);
     }
-    clearTimeout(timer);app.exit(1);
   }
 });

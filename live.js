@@ -12,6 +12,7 @@
   let level = 2, lines = 0;
   let manualHelp = false, composing = false, disposed = false;
   let pendingSend = null, pendingOpen = null, pendingHistory = null;
+  let pendingComposerFocus = null;
   let toastTimer, historyTimer;
   let codeSignature = '', sendError = '', readError = '';
   let codeCache = null;
@@ -44,6 +45,27 @@
   function canCompose() {
     return !disposed && !readError && !!api?.sendMessage && model.canCompose({ manualHelp, sending: !!pendingSend, opening: !!pendingOpen });
   }
+  function restoreComposerFocus() {
+    const token = pendingComposerFocus;
+    if (!token) return;
+    if (!current(token) || snap.route !== token.route || manualHelp || state.mode !== 'code' ||
+      !snap.loggedIn || snap.hasDialog || model.uncertainties.has(token.route)) {
+      pendingComposerFocus = null;
+      return;
+    }
+    const input = $('message-input');
+    // The IPC receipt, sending state and cleared native draft can arrive separately.
+    // Retain this request until all compose gates are open, instead of trying once.
+    if (!canCompose() || input.disabled || $('composer-area').hidden) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== document.documentElement &&
+      active !== input && active !== $('send')) {
+      pendingComposerFocus = null;
+      return;
+    }
+    pendingComposerFocus = null;
+    input.focus({ preventScroll: true });
+  }
   function updateStatus() {
     const sending = !!pendingSend || state.sending;
     const opening = !!pendingOpen || state.opening;
@@ -69,6 +91,7 @@
     }
     $('inline-status').hidden = !notice;
     $('composer-hint').textContent = sending ? '// 전송 결과를 확인하고 있습니다.' : `// Enter로 전송 · Shift+Enter로 줄 바꿈${$('message-input').value.length > 1600 ? ` · ${$('message-input').value.length}/2000` : ''}`;
+    restoreComposerFocus();
   }
   async function openConversation(key) {
     if (pendingSend || pendingOpen || state.sending || state.opening || state.clearing || !api?.openConversation) return;
@@ -145,7 +168,7 @@
     if (stick) scroll.scrollTop = scroll.scrollHeight;
     else if (pendingHistory?.route === snap.route) scroll.scrollTop = oldTop + scroll.scrollHeight - oldHeight;
   }
-  function showHelp() { manualHelp = true; renderTree(); renderCode(); updateStatus(); }
+  function showHelp() { pendingComposerFocus = null; manualHelp = true; renderTree(); renderCode(); updateStatus(); }
   function syncLayout() {
     const visible = !$('sidebar').classList.contains('is-hidden');
     $('explorer-toggle').classList.toggle('selected', visible);
@@ -162,6 +185,7 @@
     if (!change) { readError = '대화 화면을 읽지 못했습니다. 새로고침 후 다시 시도해 주세요.'; updateStatus(); return; }
     readError = ''; snap = model.snapshot;
     if (change.routeChanged || change.reset) {
+      pendingComposerFocus = null;
       $('message-input').value = change.draft;
       sendError = ''; manualHelp = false; composing = false;
       pendingHistory = null; clearTimeout(historyTimer); resizeInput();
@@ -186,7 +210,7 @@
     const route = snap.route;
     model.saveDraft(route, text);
     const token = { epoch: model.epoch, route, revision: model.draftVersions.get(route) };
-    pendingSend = token; sendError = ''; updateStatus();
+    pendingSend = token; pendingComposerFocus = token; sendError = ''; updateStatus();
     try {
       const result = await api.sendMessage({ text, route });
       if (!current(token)) return;
@@ -209,7 +233,7 @@
       if (snap.route === route) sendError = message;
       toast(message);
     } finally {
-      if (pendingSend === token) { pendingSend = null; if (!disposed) { updateStatus(); if (snap.route === route && canCompose()) input.focus(); } }
+      if (pendingSend === token) { pendingSend = null; if (!disposed) updateStatus(); }
     }
   }
 
@@ -218,6 +242,14 @@
     control.disabled = true; control.tabIndex = -1; control.classList.add('decorative-control'); control.removeAttribute('title');
   });
   listen($('composer'), 'submit', submit);
+  listen(document, 'pointerdown', event => {
+    if (pendingComposerFocus && !$('composer').contains(event.target)) pendingComposerFocus = null;
+  });
+  listen(document, 'focusin', event => {
+    if (pendingComposerFocus && event.target !== $('message-input') && event.target !== $('send') &&
+      event.target !== document.body && event.target !== document.documentElement) pendingComposerFocus = null;
+  });
+  listen(window, 'focus', restoreComposerFocus);
   listen($('message-input'), 'compositionstart', () => { composing = true; });
   listen($('message-input'), 'compositionend', () => { composing = false; });
   listen($('message-input'), 'keydown', event => {
@@ -271,7 +303,7 @@
   listen($('code-scroll'), 'scroll', hidePreview);
   for (const unsubscribe of [api?.onSnapshot?.(receiveSnapshot), api?.onState?.(receiveState)]) if (typeof unsubscribe === 'function') cleanups.push(unsubscribe);
   listen(window, 'beforeunload', () => {
-    disposed = true; clearTimeout(toastTimer); clearTimeout(historyTimer);
+    disposed = true; pendingComposerFocus = null; clearTimeout(toastTimer); clearTimeout(historyTimer);
     for (const cleanup of cleanups) cleanup();
   }, { once: true });
   renderTree(); renderCode(); updateStatus();
