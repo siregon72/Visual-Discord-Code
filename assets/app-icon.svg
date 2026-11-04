@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
+  <defs>
+    <linearGradient id="ribbon" x1="32" y1="214" x2="210" y2="32" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#62D5ED"/>
+      <stop offset=".36" stop-color="#5865F2"/>
+      <stop offset=".72" stop-color="#8274FF"/>
+      <stop offset="1" stop-color="#B9A5FF"/>
+    </linearGradient>
+    <linearGradient id="fold" x1="199" y1="27" x2="199" y2="229" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#AD96FF"/>
+      <stop offset="1" stop-color="#5865F2"/>
+    </linearGradient>
+    <clipPath id="outline"><path fill-rule="evenodd" d="M174 18 232 46V210L174 238 75 161 35 194 16 182V74L35 62 75 95ZM174 68 97 128 174 188ZM39 101V155L70 128Z"/></clipPath>
+  </defs>
+  <g clip-path="url(#outline)">
+    <path fill="url(#ribbon)" fill-rule="evenodd" d="M174 18 232 46V210L174 238 75 161 35 194 16 182V74L35 62 75 95ZM174 68 97 128 174 188ZM39 101V155L70 128Z"/>
+    <path fill="#383AC4" fill-opacity=".4" d="M16 74 35 62 174 188V238L75 161 16 110Z"/>
+    <path fill="url(#fold)" d="M174 18 232 46V210L174 238Z"/>
+    <path stroke="#D5CAFF" stroke-opacity=".42" stroke-width="2" d="M175 22V233"/>
+    <rect x="187" y="112" width="8" height="13" rx="4" fill="#fff" fill-opacity=".94"/>
+    <rect x="209" y="112" width="8" height="13" rx="4" fill="#fff" fill-opacity=".94"/>
+    <path d="M190 139Q202 146 214 139" stroke="#fff" stroke-opacity=".86" stroke-width="3.5" stroke-linecap="round"/>
+  </g>
+</svg>

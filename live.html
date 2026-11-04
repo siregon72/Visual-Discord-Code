@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https://cdn.discordapp.com https://media.discordapp.net; connect-src 'none'; object-src 'none'; base-uri 'none'">
+  <title>Visual Discord Code</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="src/renderer/utils.js" defer></script>
+  <script src="src/renderer/state.js" defer></script>
+  <script src="src/renderer/code.js" defer></script>
+    <script src="src/renderer/file-names.js" defer></script>
+  <script src="src/renderer/explorer.js" defer></script>
+  <script src="live.js" defer></script>
+</head>
+<body>
+  <header class="titlebar">
+    <img class="appmark" src="assets/app-icon.svg" alt="Visual Discord Code" draggable="false">
+    <nav class="menubar" inert aria-label="메뉴">
+      <button id="file-menu">File</button>
+      <button id="edit-menu">Edit</button>
+      <button id="selection-menu">Selection</button>
+      <button id="view-menu">View</button>
+      <button id="go-menu">Go</button>
+      <button id="run-menu">Run</button>
+      <button id="help-menu" aria-label="더 보기">⋯</button>
+    </nav>
+    <div class="navigation-controls" inert>
+      <button id="nav-back" data-action="back" title="이전 대화" aria-label="이전 대화"><svg viewBox="0 0 24 24"><path d="m10 5-7 7 7 7M3 12h18"/></svg></button>
+      <button id="nav-forward" data-action="forward" title="다음 대화" aria-label="다음 대화"><svg viewBox="0 0 24 24"><path d="m14 5 7 7-7 7M3 12h18"/></svg></button>
+    </div>
+    <div class="title-search" inert><input id="quick-search" type="search" aria-label="대화 검색" placeholder="visual-discord-code" autocomplete="off" spellcheck="false"><button id="title-search-button" title="대화 검색 (Ctrl+P)" aria-label="대화 검색"><svg viewBox="0 0 24 24"><path d="M4 4h16v12H9l-5 4V4Z"/><path d="M17 1v6M14 4h6"/></svg><svg class="search-chevron" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4"/></svg></button></div>
+    <div class="layout-controls" inert>
+      <button id="layout-menu" title="레이아웃" aria-label="레이아웃"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="5" height="18" rx="1"/><rect x="12" y="3" width="9" height="7" rx="1"/><rect x="12" y="14" width="9" height="7" rx="1"/></svg></button>
+      <button id="layout-sidebar" title="탐색기 표시 (Ctrl+B)" aria-label="탐색기 표시" aria-pressed="true"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="1.5"/><path d="M9 3v18"/><path class="layout-fill" d="M3 3h6v18H3Z"/></svg></button>
+      <button id="layout-wrap" title="줄 바꿈 전환" aria-label="줄 바꿈 전환" aria-pressed="false"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="1.5"/><path d="M3 16h18"/></svg></button>
+      <button id="layout-native" data-action="toggle-mode" title="원래 Discord 화면 전환" aria-label="원래 Discord 화면 전환"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="1.5"/><path d="M15 3v18"/></svg></button>
+    </div>
+    <div class="window-controls"><button data-action="minimize" aria-label="최소화"><svg viewBox="0 0 12 12"><path d="M1 6h10"/></svg></button><button data-action="maximize" aria-label="최대화 / 복원"><svg viewBox="0 0 12 12"><rect x="1.5" y="1.5" width="9" height="9" rx=".5"/></svg></button><button id="window-close" data-action="close" aria-label="닫기"><svg viewBox="0 0 12 12"><path d="m1 1 10 10M11 1 1 11"/></svg></button></div>
+  </header>
+  <main class="workspace">
+    <aside class="activity" aria-label="탐색">
+      <button id="explorer-toggle" class="activity-button selected" title="탐색기 표시 (Ctrl+B)" aria-label="탐색기 표시"><svg viewBox="0 0 28 28"><path d="M10 2h9l6 6v17H10a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Zm9 0v7h6M5 5H4a2 2 0 0 0-2 2v17a2 2 0 0 0 2 2h16"/></svg></button>
+      <button id="search-toggle" class="activity-button" title="대화 검색 (Ctrl+P)" aria-label="대화 검색"><svg viewBox="0 0 28 28"><circle cx="12" cy="12" r="9"/><path d="m19 19 7 7"/></svg></button>
+      <button id="direct-toggle" class="activity-button" title="다이렉트 메시지" aria-label="다이렉트 메시지"><svg viewBox="0 0 28 28"><circle cx="7" cy="5" r="3"/><circle cx="7" cy="23" r="3"/><circle cx="22" cy="9" r="3"/><path d="M7 8v12M7 17c9 0 15-1 15-5"/></svg></button>
+      <button id="compose-toggle" class="activity-button" title="메시지 입력" aria-label="메시지 입력"><svg viewBox="0 0 28 28"><path d="m10 3 15 9-10 6M10 3v9M4 18h10v7H4zM6 15v3m6-3v3M1 20h3m10 0h3M1 24h3m10 0h3M7 25v2m4-2v2"/></svg></button>
+      <button id="appearance-toggle" class="activity-button" title="화면 설정" aria-label="화면 설정"><svg viewBox="0 0 28 28"><path d="M3 4h10v10H3zM3 14h10v10H3zM13 14h10v10H13zM20 1l7 7-7 7-7-7Z"/></svg></button>
+      <button id="density-button" class="activity-button" title="장식 코드 양 조절" aria-label="장식 코드 양 조절"><svg viewBox="0 0 28 28"><path d="M14 2H9a4 4 0 0 0-4 4v5h12v3H7a5 5 0 0 0-5 5v2a4 4 0 0 0 4 4h7M14 26h5a4 4 0 0 0 4-4v-5H11v-3h10a5 5 0 0 0 5-5V7a4 4 0 0 0-4-4h-7"/><circle cx="10" cy="6" r=".7"/><circle cx="18" cy="22" r=".7"/></svg></button>
+      <button id="readme-button" class="activity-button" title="사용 방법" aria-label="사용 방법"><svg viewBox="0 0 28 28"><path d="m14 2 12 6v12l-12 6-12-6V8L14 2ZM2 8l12 6 12-6M14 14v12M7 11v11m14-11v11M8 5l12 6"/></svg></button>
+      <div class="activity-spacer"></div>
+      <button id="account-menu" class="activity-button" title="계정" aria-label="계정"><svg viewBox="0 0 28 28"><circle cx="14" cy="14" r="12"/><circle cx="14" cy="10" r="4"/><path d="M5 22v-2a5 5 0 0 1 5-5h8a5 5 0 0 1 5 5v2"/></svg></button>
+      <button id="settings-menu" class="activity-button" title="설정" aria-label="설정"><svg viewBox="0 0 28 28"><path d="m11 2-1 4-3 2-4-1-2 5 3 3v3l-1 3 5 3 3-2h4l3 2 5-3-1-3v-3l3-3-2-5-4 1-3-2-1-4Z"/><circle cx="13" cy="14" r="4"/></svg></button>
+    </aside>
+    <aside class="sidebar" id="sidebar">
+      <div class="explorer-heading"><span>Explorer</span><button id="file-names-toggle" type="button" aria-label="코드 파일명으로 표시" title="코드 파일명으로 표시" aria-pressed="false">⋯</button></div>
+      <div class="project-heading"><svg class="tree-chevron expanded" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3 5 5-5 5"/></svg><span>visual-discord-code</span></div>
+      <div id="tree" class="tree" aria-label="실제 Discord 대화 목록"></div>
+      <button class="sidebar-bottom" id="outline-toggle"><span>›</span> OUTLINE <span class="bottom-note" id="file-language">React TSX</span></button>
+      <div id="outline" class="outline" hidden>ƒ ConversationView<br>ƒ useMemo<br>ƒ handleChange</div>
+      <button class="sidebar-bottom" id="logout"><span>⏻</span> 연결 계정 로그아웃</button>
+    </aside>
+    <section class="editor" aria-label="실제 채팅 코드 화면">
+      <div class="tabbar"><div class="tabs" id="tabs"><div class="tab active"><span id="tab-icon" aria-hidden="true"></span><span id="tab-label">README.md</span><button class="tab-close" id="tab-home" aria-label="사용 방법 열기">×</button></div></div><div class="live-tools"><button id="reload" data-action="reload" title="새로고침 (F5)">↻</button><button id="toggle-wrap" title="줄 바꿈 전환">↵</button><button id="connect">로그인</button><button id="mode" data-action="toggle-mode" title="원래 화면 전환 (Ctrl+Shift+D)">◫ 원래 화면</button></div></div>
+      <div class="breadcrumb" id="breadcrumb">visual-discord-code <span class="path-separator">›</span> README.md</div>
+      <div id="inline-status" class="inline-status" role="status" hidden></div>
+      <div class="code-scroll" id="code-scroll"><div class="code-content" id="code-content"></div><div class="composer-area" id="composer-area" hidden><form id="composer"><span class="line-number" id="composer-line">1</span><span class="change-marker sent"></span><label for="message-input" class="composer-prefix">  <span class="function">setDraft</span>(<span class="string">"</span></label><textarea id="message-input" rows="1" maxlength="2000" placeholder="메시지 입력" aria-label="실제 Discord 메시지 입력" spellcheck="false"></textarea><span class="composer-suffix string">"<span class="punctuation">);</span></span><button id="send" type="submit" title="메시지 보내기 (Enter)" aria-label="메시지 보내기">↵</button></form><div class="composer-comment"><span class="composer-gutter"></span><span id="composer-hint">// Enter로 전송 · Shift+Enter로 줄 바꿈</span></div></div></div>
+    </section>
+  </main>
+  <footer class="statusbar"><span class="remote-indicator">⌁</span><span>⑂ main</span><span id="connection-status">연결 준비 중</span><span class="status-spacer"></span><span id="cursor-status">Ln 1, Col 1</span><button id="spaces">Spaces: 2</button><span class="optional-status">UTF-8</span><span id="language-status">TypeScript React</span></footer>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <div id="media-preview" class="media-preview" hidden><img id="preview-image" alt="첨부 이미지 미리보기"><span id="preview-name"></span></div>
+</body>
+</html>

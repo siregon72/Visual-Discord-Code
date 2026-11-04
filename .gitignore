@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.log
+test-results/
+coverage/
+.env
+.env.*
+!.env.example
