@@ -550,6 +550,63 @@ test('a long plain-text snapshot has bounded layout reads and does not clone eve
   } finally {dom.window.close();}
 });
 
+test('composer checks reuse shared ancestor reads only within each fresh DOM check', t => {
+  const dom=makePage();
+  try {
+    const win=dom.window;
+    const {document}=win;
+    const api=win.__vdcAdapter;
+    const count=200;
+    const list=document.querySelector('[data-list-id="chat-messages"]');
+    list.innerHTML=Array.from({length:count},(_,index)=>`<li id="chat-messages-200-${5000+index}">message</li>`).join('');
+    let styles=0;
+    const getStyle=win.getComputedStyle;
+    win.getComputedStyle=(...args)=>{styles++;return getStyle.apply(win,args);};
+    const measure=operation=>{styles=0;const result=operation();return {result,styles};};
+    const state=measure(()=>api.composerState(route));
+    const focused=measure(()=>api.focusComposer(route));
+    const composer=document.querySelector('[data-slate-editor]');
+    composer.textContent='전송';
+    const submitted=measure(()=>api.submitComposer(route,'전송'));
+    t.diagnostic(`style reads for ${count} rows: state=${state.styles}, focus=${focused.styles}, submit=${submitted.styles}`);
+    assert.equal(state.result.ok,true);
+    assert.equal(focused.result.ok,true);
+    assert.equal(submitted.result.ok,true);
+    assert.ok(state.styles<count+30,`one composer check must read shared ancestors only once (${state.styles})`);
+    assert.ok(focused.styles<count*2+60,`focus must use independent cached reads before and after focus (${focused.styles})`);
+    assert.ok(submitted.styles<count*2+60,`submission must use independent cached reads across keydown (${submitted.styles})`);
+    document.querySelector('form').style.display='none';
+    assert.equal(api.composerState(route).ok,false,'a later check must observe changed composer visibility');
+    document.querySelector('form').style.display='';
+    list.lastElementChild.id='chat-messages-201-5199';
+    assert.equal(api.composerState(route).routeReady,false,'a later check must observe changed rendered channel IDs');
+  } finally {dom.window.close();}
+});
+
+test('composer visibility mutations during focus and keydown never reuse the earlier read', () => {
+  for (const eventType of ['focus','keydown']) {
+    const dom=makePage();
+    try {
+      const {document}=dom.window;
+      const api=dom.window.__vdcAdapter;
+      const composer=document.querySelector('[data-slate-editor]');
+      const form=document.querySelector('form');
+      composer.addEventListener(eventType,()=>{form.style.display='none';});
+      if (eventType==='focus') {
+        assert.equal(api.focusComposer(route).ok,false,'focus callbacks can hide a previously valid editor');
+      } else {
+        assert.equal(api.focusComposer(route).ok,true);
+        composer.textContent='전송';
+        let keypresses=0;
+        document.addEventListener('keypress',()=>keypresses++);
+        assert.equal(api.submitComposer(route,'전송').dispatched,true);
+        assert.equal(keypresses,0,'a hidden editor cannot receive the follow-up keypress');
+        assert.equal(composer.textContent,'전송');
+      }
+    } finally {dom.window.close();}
+  }
+});
+
 test('long channel categories are scanned once and are refreshed after a category edit or move', t => {
   const dom=makePage();
   try {

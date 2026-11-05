@@ -21,7 +21,7 @@ const fixture = `<!doctype html><html><head><meta charset="utf-8"><title>Discord
 </ol></div></div><form><div class="channelTextArea_123"><div role="textbox" contenteditable="true" data-slate-editor="true" class="slateTextArea_123" tabindex="0"><p><br></p></div></div></form></main>
 <script>
 history.replaceState({}, '', '${route}');
-window.__sentTexts=[]; window.__enterCount=0; window.__delayAck=0; window.__renderBold=false;
+window.__sentTexts=[]; window.__enterCount=0; window.__delayAck=0; window.__delayClear=0; window.__renderBold=false;
 window.__inputLog=[];
 for(const type of ['focus','blur','keydown','keyup','keypress'])window.addEventListener(type,event=>window.__inputLog.push({type,key:event.key,focused:document.hasFocus(),active:document.activeElement?.getAttribute('role')}),true);
 const composer=document.querySelector('[data-slate-editor]');
@@ -30,8 +30,10 @@ composer.addEventListener('keydown',event=>{
   if(event.key!=='Enter'||event.shiftKey||event.isComposing)return;
   event.preventDefault(); window.__enterCount++;
   const text=composer.innerText.trim(); if(!text)return;
-  window.__sentTexts.push(text); composer.innerHTML='<p><br></p>';
-  const add=()=>{const id=Math.max(900,...[...document.querySelectorAll('[id^="chat-messages-123-"]')].map(row=>Number(row.id.split('-').at(-1))||0))+1;const row=document.createElement('li');row.id='chat-messages-123-'+id;const h=document.createElement('h3');const n=document.createElement('span');n.id='message-username-'+id;n.textContent='테스트 사용자';h.append(n);const time=document.createElement('time');time.dateTime=new Date().toISOString();h.append(time);const c=document.createElement('div');c.id='message-content-'+id;c.textContent=window.__renderBold&&text.startsWith('**')&&text.endsWith('**')?text.slice(2,-2):text;row.append(h,c);document.getElementById('messages').append(row);};
+  window.__sentTexts.push(text);
+  const clear=()=>{composer.innerHTML='<p><br></p>';};
+  if(window.__delayClear)setTimeout(clear,window.__delayClear);else clear();
+  const add=()=>{const id=Math.max(900,Number(sessionStorage.getItem('fixtureCounter')||900),...[...document.querySelectorAll('[id^="chat-messages-123-"]')].map(row=>Number(row.id.split('-').at(-1))||0))+1;sessionStorage.setItem('fixtureCounter',String(id));const row=document.createElement('li');row.id='chat-messages-123-'+id;const h=document.createElement('h3');const n=document.createElement('span');n.id='message-username-'+id;n.textContent='테스트 사용자';h.append(n);const time=document.createElement('time');time.dateTime=new Date().toISOString();h.append(time);const c=document.createElement('div');c.id='message-content-'+id;c.textContent=window.__renderBold&&text.startsWith('**')&&text.endsWith('**')?text.slice(2,-2):text;row.append(h,c);document.getElementById('messages').append(row);};
   if(window.__delayAck)setTimeout(add,window.__delayAck);else add();
 });
 </script></body></html>`;
@@ -132,7 +134,7 @@ app.whenReady().then(async () => {
     const frameNavigations=[];
     const observeFrame=details=>frameNavigations.push({main:details.isMainFrame,same:details.isSameDocument});
     guest.on('did-start-navigation',observeFrame);
-    await guest.executeJavaScript('window.__delayAck=800');
+    await guest.executeJavaScript('window.__delayAck=800;window.__delayClear=500');
     win.focus();host.focus();await until(()=>win.isFocused());
     const frameSend=host.executeJavaScript(`window.vdc.sendMessage({text:'임베드 로딩 중 전송',route:${JSON.stringify(route)}})`,true);
     await until(()=>guest.executeJavaScript('window.__sentTexts.length===2'));
@@ -141,7 +143,8 @@ app.whenReady().then(async () => {
     assert.equal((await frameSend).ok,true,'embedded frame loading must not cancel send acknowledgement');
     assert.equal(await guest.executeJavaScript('window.__enterCount'),2);
     guest.removeListener('did-start-navigation',observeFrame);
-    await guest.executeJavaScript(`window.__delayAck=0;document.getElementById('loading-embed').remove();`);
+    await until(()=>guest.executeJavaScript('document.getElementById("messages").textContent.includes("임베드 로딩 중 전송")'));
+    await guest.executeJavaScript(`window.__delayAck=0;window.__delayClear=0;document.getElementById('loading-embed').remove();`);
     logger.log('PASS: real embedded-frame navigation preserves the active send and its acknowledgement');
 
     await host.executeJavaScript(`window.vdc.action('toggle-mode')`,true);
@@ -191,16 +194,24 @@ app.whenReady().then(async () => {
     logger.log('PASS: rendered Markdown acknowledges once and restores the composer');
 
     await guest.executeJavaScript('window.__delayAck=10500;window.__renderBold=false');
+    const acceptedStart=Date.now();
     await host.executeJavaScript(`{
       const input=document.getElementById('message-input');input.value='늦게 도착하는 전송 확인';
       input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();document.getElementById('composer').requestSubmit();
     }`,true);
-    await until(()=>host.executeJavaScript('document.getElementById("inline-status").textContent.includes("자동으로")'));
-    assert.equal(await host.executeJavaScript('document.getElementById("message-input").value'),'늦게 도착하는 전송 확인');
-    await until(()=>host.executeJavaScript('document.getElementById("message-input").value==="" && !document.getElementById("message-input").disabled'));
+    await until(()=>host.executeJavaScript('document.getElementById("message-input").value==="" && !document.getElementById("message-input").disabled && document.activeElement===document.getElementById("message-input")'),2000);
+    const acceptedMs=Date.now()-acceptedStart;
+    assert.ok(acceptedMs<2000,'waiting for server confirmation must not lock the next draft');
+    assert.equal(await host.executeJavaScript('document.getElementById("connection-status").textContent'),'전송 확인 중 · 1건');
+    assert.equal(await host.executeJavaScript('document.getElementById("inline-status").hidden'),true);
+    await host.insertText('확인 중에도 작성하는 다음 초안');
+    assert.equal(await host.executeJavaScript('document.getElementById("message-input").value'),'확인 중에도 작성하는 다음 초안');
+    logger.log('PASS: next draft enabled in '+acceptedMs+'ms with a 10.5-second delayed receipt');
+    await until(()=>host.executeJavaScript('document.getElementById("connection-status").textContent==="Discord 연결됨"'));
+    assert.equal(await host.executeJavaScript('document.getElementById("message-input").value'),'확인 중에도 작성하는 다음 초안');
     assert.equal(await guest.executeJavaScript('window.__enterCount'),2,'late receipt never resends');
     assert.equal(await host.executeJavaScript('document.getElementById("inline-status").hidden'),true);
-    logger.log('PASS: late confirmation automatically unlocks the composer without native view or duplicate sends');
+    logger.log('PASS: background confirmation preserves the next draft without native view or duplicate sends');
     clearTimeout(timer);app.exit(0);
   } catch(error) {
     try {

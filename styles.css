@@ -1178,7 +1178,7 @@ input, textarea {
   }
 }
 
-.acknowledge {
+.acknowledge, .restore-message, .dismiss-message {
   margin-left:12px;
   padding:3px 8px;
   border:1px solid #6b5c3f;

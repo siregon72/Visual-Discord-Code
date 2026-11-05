@@ -303,13 +303,18 @@
   }
 
   function composerState(expectedRoute) {
-    const currentRoute = route();
-    const composer = getComposer();
-    const hasDialog = dialogs().length > 0;
-    const ready = routeReady();
-    const canSend = CHAT_ROUTE.test(currentRoute) && ready && !!composer && !hasDialog;
-    const focused = !!composer && (document.activeElement === composer || composer.contains(document.activeElement));
-    return { ok: currentRoute === expectedRoute && canSend, text: draftText(composer), route: currentRoute, canSend, hasDialog, focused, documentFocused: document.hasFocus(), routeReady: ready };
+    // Route validation checks every visible row. Reuse their shared ancestor
+    // visibility for this synchronous read only; focus and keyboard callbacks
+    // can mutate the DOM, so each subsequent check starts a fresh context.
+    return withReadContext(() => {
+      const currentRoute = route();
+      const composer = getComposer();
+      const hasDialog = dialogs().length > 0;
+      const ready = routeReady();
+      const canSend = CHAT_ROUTE.test(currentRoute) && ready && !!composer && !hasDialog;
+      const focused = !!composer && (document.activeElement === composer || composer.contains(document.activeElement));
+      return { ok: currentRoute === expectedRoute && canSend, text: draftText(composer), route: currentRoute, canSend, hasDialog, focused, documentFocused: document.hasFocus(), routeReady: ready };
+    });
   }
 
   function focusComposer(expectedRoute) {

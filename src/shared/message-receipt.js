@@ -41,16 +41,17 @@
     return { route, text, startedAt, existingIds: (Array.isArray(rows) ? rows : []).map(row => row?.id).filter(Boolean), pendingIds: [], unrelatedConfirmedIds: [] };
   }
 
-  function observeReceipt(receipt, current, observedAt = Date.now()) {
+  function observeReceipt(receipt, current, observedAt = Date.now(), { claimedIds } = {}) {
     if (!receipt || current?.route !== receipt.route) return { status: 'changed' };
     if (receipt.terminal) return { status: receipt.terminal };
     if (current.routeReady === false || current.hasDialog) return { status: 'waiting' };
     const existing = new Set(receipt.existingIds), pendingIds = new Set(receipt.pendingIds), unrelated = new Set(receipt.unrelatedConfirmedIds);
     const candidates = (Array.isArray(current.rows) ? current.rows : []).filter(row => row?.id &&
-      !existing.has(row.id) && row.own === true && matchesText(row.text, receipt.text)).map(row => ({ row, time: messageTime(row) })).filter(({ time }) =>
+      !existing.has(row.id) && !claimedIds?.has(row.id) && row.own === true && matchesText(row.text, receipt.text)).map(row => ({ row, time: messageTime(row) })).filter(({ time }) =>
       time === null || (time >= receipt.startedAt - ACK_CLOCK_TOLERANCE_MS && time <= observedAt + ACK_CLOCK_TOLERANCE_MS));
-    const terminal = status => { receipt.terminal = status; return { status }; };
-    if (candidates.some(({ row }) => row.failed)) return terminal('failed');
+    const terminal = (status, row) => { receipt.terminal = status; return { status, ...(row ? { row } : {}) }; };
+    const failed = candidates.find(({ row }) => row.failed);
+    if (failed) return terminal('failed', failed.row);
     const pending = candidates.filter(({ row }) => row.pending);
     if (pending.length > 1) return terminal('ambiguous');
     if (pending.length) {
@@ -69,7 +70,13 @@
       // Replacing a local pending ID requires a fresh server timestamp. An
       // undated row coming into view cannot establish that relationship.
       if (pendingIds.size && !pendingIds.has(row.id) && time === null) return { status: 'waiting' };
-      if (!normalize(current.draftText)) return { status: 'confirmed', row };
+      if (!normalize(current.draftText)) {
+        // Process receipts in submission order with one shared set per route.
+        // Only an unambiguous acknowledgement can claim a rendered message;
+        // later identical submissions cannot consume that acknowledgement.
+        claimedIds?.add(row.id);
+        return { status: 'confirmed', row };
+      }
     }
     return { status: 'waiting' };
   }

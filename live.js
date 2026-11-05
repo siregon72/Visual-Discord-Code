@@ -8,6 +8,8 @@
   const collapsed = new Set();
   const cleanups = [];
   const recoverableSends = new Map();
+  const backgroundSends = new Map();
+  const claimedRows = new Map();
   const recoveryNotice = '전송 확인이 지연되고 있습니다. 확인되면 자동으로 입력을 다시 사용할 수 있습니다.';
   const unresolvedNotice = '전송 여부가 불확실합니다. 대화에 표시된 내용을 확인한 뒤 입력을 다시 사용해 주세요.';
   let snap = model.snapshot;
@@ -25,6 +27,10 @@
     cleanups.push(() => element.removeEventListener(name, callback, options));
   }
   function current(token) { return !disposed && token.epoch === model.epoch; }
+  function receiptClaims(route) {
+    if (!claimedRows.has(route)) claimedRows.set(route, new Set());
+    return claimedRows.get(route);
+  }
   function hidePreview() {
     $('media-preview').hidden = true;
     $('preview-image').removeAttribute('src');
@@ -73,9 +79,11 @@
     const sending = !!pendingSend || state.sending;
     const opening = !!pendingOpen || state.opening;
     const error = readError || state.error;
+    const retained = [...backgroundSends.values()].filter(entry => entry.token.route === snap.route);
+    const confirming = retained.filter(entry => entry.status === 'pending').length;
     $('mode').textContent = state.mode === 'native' ? '⌘ 코드 화면' : '◫ 원래 화면';
     $('connect').hidden = snap.loggedIn;
-    $('connection-status').textContent = error || (sending ? '전송 확인 중…' : opening ? '대화 여는 중…' : state.clearing ? '로그아웃 중…' : state.busy ? 'Discord 연결 중…' : snap.loggedIn ? 'Discord 연결됨' : 'Discord 로그인이 필요합니다');
+    $('connection-status').textContent = error || (sending ? '전송 중…' : opening ? '대화 여는 중…' : state.clearing ? '로그아웃 중…' : state.busy ? 'Discord 연결 중…' : confirming ? `전송 확인 중 · ${confirming}건` : snap.loggedIn ? 'Discord 연결됨' : 'Discord 로그인이 필요합니다');
     document.querySelector('.statusbar').classList.toggle('pending', sending || !!error);
     document.querySelector('.statusbar').classList.toggle('disconnected', !snap.loggedIn);
     $('message-input').disabled = !canCompose();
@@ -92,7 +100,26 @@
       checked.addEventListener('click', () => { model.uncertainties.delete(snap.route); recoverableSends.delete(snap.route); sendError = ''; updateStatus(); $('message-input').focus(); });
       $('inline-status').append(checked);
     }
-    $('inline-status').hidden = !notice;
+    for (const entry of retained.filter(item => item.status !== 'pending')) {
+      const saved = document.createElement('div');
+      const label = entry.status === 'failed' ? '전송 실패' : '전송 결과 미확인';
+      saved.textContent = `${label}: ${entry.text.length > 80 ? entry.text.slice(0, 80) + '…' : entry.text} `;
+      saved.title = entry.text;
+      const restore = document.createElement('button');
+      restore.textContent = '내용 복원'; restore.className = 'restore-message';
+      restore.disabled = !canCompose() || !!$('message-input').value || !!model.drafts.get(snap.route);
+      restore.title = entry.status === 'failed' ? '빈 입력창으로 내용을 복원합니다.' : '대화에 이미 표시된 메시지인지 확인한 뒤 복원해 주세요.';
+      restore.addEventListener('click', () => {
+        if (!current(entry.token) || snap.route !== entry.token.route || !canCompose() || $('message-input').value || model.drafts.get(snap.route)) return;
+        $('message-input').value = entry.text; model.saveDraft(snap.route, entry.text);
+        backgroundSends.delete(entry.token); resizeInput(); updateStatus(); $('message-input').focus();
+      });
+      const dismiss = document.createElement('button');
+      dismiss.textContent = '확인 후 보관 해제'; dismiss.className = 'dismiss-message';
+      dismiss.addEventListener('click', () => { backgroundSends.delete(entry.token); updateStatus(); });
+      saved.append(restore, dismiss); $('inline-status').append(saved);
+    }
+    $('inline-status').hidden = !notice && !retained.some(entry => entry.status !== 'pending');
     $('composer-hint').textContent = sending ? '// 전송 결과를 확인하고 있습니다.' : `// Enter로 전송 · Shift+Enter로 줄 바꿈${$('message-input').value.length > 1600 ? ` · ${$('message-input').value.length}/2000` : ''}`;
     restoreComposerFocus();
   }
@@ -182,10 +209,9 @@
   function toggleWrap() { document.querySelector('.editor').classList.toggle('wrap-lines'); syncLayout(); }
   function density() { level = [0, 2, 4, 8][([0, 2, 4, 8].indexOf(level) + 1) % 4]; $('spaces').textContent = `Spaces: ${level}`; renderCode(false, true); }
 
-  function completeSend(token, text) {
+  function releaseSubmittedDraft(token, text) {
     if (!current(token)) return;
     const route = token.route, input = $('message-input');
-    model.uncertainties.delete(route); recoverableSends.delete(route);
     if (model.draftVersions.get(route) === token.revision && model.drafts.get(route) === text) {
       model.saveDraft(route, '');
       if (snap.route === route && input.value === text) { input.value = ''; resizeInput(); }
@@ -196,10 +222,29 @@
       $('code-scroll').scrollTop = $('code-scroll').scrollHeight;
     }
   }
+  function completeSend(token, text) {
+    if (!current(token)) return;
+    model.uncertainties.delete(token.route); recoverableSends.delete(token.route);
+    releaseSubmittedDraft(token, text);
+  }
 
   function reconcileSend() {
     clearTimeout(recoveryTimer);
     let nextExpiry = Infinity;
+    for (const [token, entry] of backgroundSends) {
+      if (!current(token)) { backgroundSends.delete(token); continue; }
+      if (entry.status !== 'pending') continue;
+      const remaining = entry.receipt.startedAt + 60000 - Date.now();
+      if (remaining <= 0) { entry.status = 'unresolved'; continue; }
+      if (token.route === snap.route && snap.loggedIn && snap.routeReady) {
+        const result = window.VDCSendReceipt.observeReceipt(entry.receipt, snap, Date.now(), { claimedIds: receiptClaims(token.route) });
+        if (result.status === 'confirmed') { backgroundSends.delete(token); continue; }
+        if (['failed', 'ambiguous', 'changed'].includes(result.status)) {
+          entry.status = result.status === 'failed' ? 'failed' : 'unresolved'; continue;
+        }
+      }
+      nextExpiry = Math.min(nextExpiry, remaining);
+    }
     for (const [route, entry] of recoverableSends) {
       // A much later, unrelated message with identical text is not a receipt.
       const remaining = entry.receipt.startedAt + 60000 - Date.now();
@@ -208,7 +253,7 @@
         recoverableSends.delete(route); continue;
       }
       if (route === snap.route && snap.loggedIn && snap.routeReady) {
-        const result = window.VDCSendReceipt.observeReceipt(entry.receipt, snap);
+        const result = window.VDCSendReceipt.observeReceipt(entry.receipt, snap, Date.now(), { claimedIds: receiptClaims(route) });
         if (result.status === 'confirmed') { completeSend(entry.token, entry.text); continue; }
         if (['failed', 'ambiguous', 'changed'].includes(result.status)) { sendError = unresolvedNotice; recoverableSends.delete(route); continue; }
       }
@@ -230,7 +275,7 @@
     }
     if (change.reset) {
       pendingSend = null; pendingOpen = null; collapsed.clear();
-      recoverableSends.clear(); clearTimeout(recoveryTimer);
+      recoverableSends.clear(); backgroundSends.clear(); claimedRows.clear(); clearTimeout(recoveryTimer);
       clearTimeout(toastTimer); $('toast').hidden = true;
     }
     reconcileSend();
@@ -254,18 +299,23 @@
     try {
       const result = await api.sendMessage({ text, route });
       if (!current(token)) return;
-      if (result?.ok) {
+      const hasReceipt = result?.receipt?.route === route && result.receipt.text === text &&
+        Number.isFinite(result.receipt.startedAt) && window.VDCSendReceipt;
+      if (result?.ok && hasReceipt) {
+        backgroundSends.set(token, { token, text, receipt: result.receipt, status: 'pending' });
+        releaseSubmittedDraft(token, text); reconcileSend();
+      } else if (result?.ok && !result.pending) {
         completeSend(token, text);
       } else {
-        if (result?.uncertain) model.uncertainties.add(route);
-        const message = typeof result?.error === 'string' ? result.error : '전송하지 못했습니다. 입력 내용은 그대로 남아 있습니다.';
+        const uncertain = result?.uncertain || !!result?.ok;
+        if (uncertain) model.uncertainties.add(route);
+        const message = typeof result?.error === 'string' ? result.error : uncertain ? '전송 결과를 확인하지 못했습니다. 입력 내용은 그대로 보관됩니다.' : '전송하지 못했습니다. 입력 내용은 그대로 남아 있습니다.';
         if (snap.route === route) sendError = message;
-        if (result?.uncertain && result.submitted === true && result.receipt?.route === route && result.receipt.text === text &&
-          Number.isFinite(result.receipt.startedAt) && window.VDCSendReceipt) {
+        if (result?.uncertain && result.submitted === true && hasReceipt) {
           recoverableSends.set(route, { token, text, receipt: result.receipt });
           reconcileSend();
         }
-        if ((!recoverableSends.has(route) && model.uncertainties.has(route)) || !result?.uncertain) toast(snap.route === route ? sendError || message : message);
+        if ((!recoverableSends.has(route) && model.uncertainties.has(route)) || !uncertain) toast(snap.route === route ? sendError || message : message);
       }
     } catch {
       if (!current(token)) return;
@@ -344,7 +394,7 @@
   listen($('code-scroll'), 'scroll', hidePreview);
   for (const unsubscribe of [api?.onSnapshot?.(receiveSnapshot), api?.onState?.(receiveState)]) if (typeof unsubscribe === 'function') cleanups.push(unsubscribe);
   listen(window, 'beforeunload', () => {
-    disposed = true; pendingComposerFocus = null; recoverableSends.clear(); clearTimeout(recoveryTimer); clearTimeout(toastTimer); clearTimeout(historyTimer);
+    disposed = true; pendingComposerFocus = null; recoverableSends.clear(); backgroundSends.clear(); claimedRows.clear(); clearTimeout(recoveryTimer); clearTimeout(toastTimer); clearTimeout(historyTimer);
     for (const cleanup of cleanups) cleanup();
   }, { once: true });
   renderTree(); renderCode(); updateStatus();

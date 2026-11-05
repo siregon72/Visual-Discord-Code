@@ -294,6 +294,197 @@ function sentRow(message, changes = {}) {
   return { id: 'new-own-message', author: '나', text: message, time: new Date().toISOString(), own: true, media: [], ...changes };
 }
 
+function acceptedReceipt(ui, message, { route = routeA, startedAt = Date.now(), rows = snapshot().rows } = {}) {
+  return { ok: true, pending: true, receipt: ui.dom.window.VDCSendReceipt.createReceipt({ route, text: message, startedAt, rows }) };
+}
+
+test('an accepted send releases focus and permits the next send while confirmation stays in the background', async () => {
+  const ui = makeUI();
+  try {
+    const document = ui.dom.window.document, first = '첫 전송', second = '다음 전송';
+    const focus = observeComposerFocus(ui);
+    ui.type(first); pressEnter(ui); blurDisabledComposer(ui);
+    ui.sends[0].resolve(acceptedReceipt(ui, first)); await tick();
+    assert.equal(ui.input.value, '');
+    assert.equal(ui.input.disabled, false);
+    assert.strictEqual(document.activeElement, ui.input);
+    assert.equal(focus.calls, 1);
+    assert.equal(document.getElementById('connection-status').textContent, '전송 확인 중 · 1건');
+    assert.equal(document.getElementById('inline-status').hidden, true);
+    assert.equal(document.querySelector('.acknowledge'), null);
+    assert.equal(document.getElementById('toast').hidden, true);
+
+    ui.type(second); pressEnter(ui);
+    assert.equal(ui.sends.length, 2);
+    ui.sends[1].resolve(acceptedReceipt(ui, second)); await tick();
+    assert.equal(document.getElementById('connection-status').textContent, '전송 확인 중 · 2건');
+    ui.type('계속 작성하는 초안');
+    ui.callbacks.snapshot({ ...snapshot(), rows: [sentRow(first, { id: 'first' }), sentRow(second, { id: 'second' })] });
+    assert.equal(document.getElementById('connection-status').textContent, 'Discord 연결됨');
+    assert.equal(ui.input.value, '계속 작성하는 초안');
+    assert.equal(ui.input.disabled, false);
+    assert.equal(ui.actions.includes('toggle-mode'), false);
+    assert.equal(ui.sends.length, 2, 'background confirmation never resubmits');
+  } finally { ui.dom.window.close(); }
+});
+
+test('background acceptance still waits for the backend and native draft readiness gates', async () => {
+  const ui = makeUI();
+  try {
+    const message = '아직 보이는 원래 초안', focus = observeComposerFocus(ui);
+    ui.type(message); ui.submit(); blurDisabledComposer(ui);
+    ui.callbacks.state({ sending: true });
+    ui.callbacks.snapshot({ ...snapshot(), draftText: message });
+    ui.sends[0].resolve(acceptedReceipt(ui, message)); await tick();
+    assert.equal(ui.input.value, '');
+    assert.equal(ui.input.disabled, true);
+    ui.callbacks.state({ sending: false });
+    assert.equal(ui.input.disabled, true);
+    assert.equal(focus.calls, 0);
+    ui.callbacks.snapshot(snapshot());
+    assert.equal(ui.input.disabled, false);
+    assert.equal(focus.calls, 1);
+  } finally { ui.dom.window.close(); }
+});
+
+test('acceptance cannot clear a revised draft and a malformed pending receipt cannot claim success', async () => {
+  for (const malformed of [false, true]) {
+    const ui = makeUI();
+    try {
+      const message = '전송한 내용';
+      ui.type(message); ui.submit();
+      const result = acceptedReceipt(ui, message);
+      if (malformed) result.receipt.route = routeB;
+      else { ui.type('새 초안'); ui.type(message); }
+      ui.sends[0].resolve(result); await tick();
+      assert.equal(ui.input.value, message, 'only the exact submitted draft revision may be cleared');
+      assert.equal(ui.input.disabled, malformed);
+      if (malformed) assert.ok(ui.dom.window.document.querySelector('.acknowledge'));
+      assert.equal(ui.sends.length, 1);
+    } finally { ui.dom.window.close(); }
+  }
+});
+
+test('a late failure retains exact sent text without overwriting a new draft or automatically retrying', async () => {
+  const ui = makeUI();
+  try {
+    const document = ui.dom.window.document, message = '  <img src=x onerror=alert(1)>\n**복원할 내용**  ';
+    ui.type(message); ui.submit(); ui.sends[0].resolve(acceptedReceipt(ui, message)); await tick();
+    ui.type('새로 작성하는 초안');
+    ui.callbacks.snapshot({ ...snapshot(), rows: [sentRow(message, { failed: true })] });
+    assert.equal(ui.input.value, '새로 작성하는 초안');
+    assert.equal(ui.input.disabled, false);
+    assert.match(document.getElementById('inline-status').textContent, /전송 실패/);
+    assert.equal(document.querySelector('.restore-message').disabled, true);
+    assert.equal(document.getElementById('inline-status').querySelector('img'), null);
+    document.querySelector('.restore-message').click();
+    assert.equal(ui.input.value, '새로 작성하는 초안');
+    ui.type('');
+    assert.equal(document.querySelector('.restore-message').disabled, false);
+    document.querySelector('.restore-message').click();
+    assert.equal(ui.input.value, message);
+    assert.equal(document.getElementById('inline-status').hidden, true);
+    assert.equal(ui.sends.length, 1);
+    assert.equal(ui.actions.includes('toggle-mode'), false);
+  } finally { ui.dom.window.close(); }
+});
+
+test('unresolved or ambiguous background receipts keep a recoverable message without blocking new composition', async () => {
+  for (const reason of ['expired', 'ambiguous']) {
+    const ui = makeUI();
+    try {
+      const document = ui.dom.window.document, message = '보관한 내용', startedAt = Date.now();
+      ui.type(message); ui.submit(); ui.sends[0].resolve(acceptedReceipt(ui, message, { startedAt })); await tick();
+      if (reason === 'expired') ui.dom.window.Date.now = () => startedAt + 60001;
+      ui.callbacks.snapshot({ ...snapshot(), rows: reason === 'ambiguous' ? [sentRow(message), sentRow(message, { id: 'another' })] : [] });
+      assert.equal(ui.input.disabled, false, reason);
+      assert.equal(ui.input.value, '');
+      assert.match(document.getElementById('inline-status').textContent, /전송 결과 미확인/);
+      assert.equal(document.querySelector('.acknowledge'), null);
+      assert.equal(document.querySelector('.restore-message').disabled, false);
+      document.querySelector('.dismiss-message').click();
+      assert.equal(document.getElementById('inline-status').hidden, true);
+      assert.equal(ui.sends.length, 1);
+    } finally { ui.dom.window.close(); }
+  }
+});
+
+test('identical sequential submissions each require their own confirmed row, including an immediate backend receipt', async () => {
+  for (const immediate of [false, true]) {
+    const ui = makeUI();
+    try {
+      const document = ui.dom.window.document, message = '같은 내용';
+      ui.type(message); ui.submit(); ui.sends[0].resolve(acceptedReceipt(ui, message)); await tick();
+      ui.type(message); ui.submit();
+      if (immediate) ui.callbacks.snapshot({ ...snapshot(), rows: [sentRow(message, { id: 'first' })] });
+      const second = acceptedReceipt(ui, message);
+      if (immediate) { second.pending = false; second.confirmedRowId = 'first'; }
+      ui.sends[1].resolve(second); await tick();
+      ui.callbacks.snapshot({ ...snapshot(), rows: [sentRow(message, { id: 'first' })] });
+      assert.equal(document.getElementById('connection-status').textContent, '전송 확인 중 · 1건', String(immediate));
+      ui.callbacks.snapshot({ ...snapshot(), rows: [sentRow(message, { id: 'first' })] });
+      assert.equal(document.getElementById('connection-status').textContent, '전송 확인 중 · 1건', 'one row cannot acknowledge two sends');
+      ui.type('그다음 초안');
+      ui.callbacks.snapshot({ ...snapshot(), rows: [sentRow(message, { id: 'first' }), sentRow(message, { id: 'second' })] });
+      assert.equal(document.getElementById('connection-status').textContent, 'Discord 연결됨');
+      assert.equal(ui.input.value, '그다음 초안');
+      assert.equal(ui.sends.length, 2);
+    } finally { ui.dom.window.close(); }
+  }
+});
+
+test('background receipts stay with their conversation and cannot erase the draft in another conversation', async () => {
+  const ui = makeUI();
+  try {
+    const document = ui.dom.window.document, message = '첫 대화의 메시지';
+    ui.type(message); ui.submit(); ui.sends[0].resolve(acceptedReceipt(ui, message)); await tick();
+    ui.callbacks.snapshot(snapshot(routeB)); ui.type('두 번째 대화 초안');
+    ui.callbacks.snapshot({ ...snapshot(routeB), rows: [sentRow(message)] });
+    assert.equal(document.getElementById('connection-status').textContent, 'Discord 연결됨');
+    assert.equal(ui.input.value, '두 번째 대화 초안');
+    ui.callbacks.snapshot(snapshot());
+    assert.equal(document.getElementById('connection-status').textContent, '전송 확인 중 · 1건');
+    ui.callbacks.snapshot({ ...snapshot(), rows: [sentRow(message)] });
+    assert.equal(document.getElementById('connection-status').textContent, 'Discord 연결됨');
+    ui.callbacks.snapshot(snapshot(routeB));
+    assert.equal(ui.input.value, '두 번째 대화 초안');
+  } finally { ui.dom.window.close(); }
+});
+
+test('an account reset discards pending receipts, retained failures and claimed rows from the previous account', async () => {
+  const ui = makeUI();
+  try {
+    const document = ui.dom.window.document, message = '계정별 메시지';
+    for (const [index, result] of ['confirmed', 'failed', 'pending'].entries()) {
+      ui.type(message); ui.submit(); ui.sends[index].resolve(acceptedReceipt(ui, message)); await tick();
+      if (result !== 'pending') ui.callbacks.snapshot({ ...snapshot(), rows: [sentRow(message, { id: result, failed: result === 'failed' })] });
+    }
+    assert.ok(document.querySelector('.restore-message'));
+    ui.callbacks.snapshot({ ...snapshot(), reset: true });
+    assert.equal(document.getElementById('connection-status').textContent, 'Discord 연결됨');
+    assert.equal(document.getElementById('inline-status').hidden, true);
+    ui.type(message); ui.submit(); ui.sends[3].resolve(acceptedReceipt(ui, message)); await tick();
+    ui.callbacks.snapshot({ ...snapshot(), rows: [sentRow(message, { id: 'confirmed' })] });
+    assert.equal(document.getElementById('connection-status').textContent, 'Discord 연결됨', 'the previous account claim is gone');
+    assert.equal(document.querySelector('.restore-message'), null);
+  } finally { ui.dom.window.close(); }
+});
+
+test('an accepted receipt arriving after an account reset cannot clear or retain any text for the new account', async () => {
+  const ui = makeUI();
+  try {
+    const document = ui.dom.window.document, message = '이전 계정 전송';
+    ui.type(message); ui.submit();
+    const result = acceptedReceipt(ui, message);
+    ui.callbacks.snapshot({ ...snapshot(), reset: true }); ui.type('새 계정 초안');
+    ui.sends[0].resolve(result); await tick();
+    assert.equal(ui.input.value, '새 계정 초안');
+    assert.equal(ui.input.disabled, false);
+    assert.equal(document.getElementById('connection-status').textContent, 'Discord 연결됨');
+    assert.equal(document.getElementById('inline-status').hidden, true);
+  } finally { ui.dom.window.close(); }
+});
+
 test('a delayed confirmed message automatically releases the composer without resending or opening the native view', async () => {
   const ui = makeUI();
   try {

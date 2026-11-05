@@ -224,6 +224,16 @@ test('send observations cannot restore old discovery after an account identity g
   } finally { gate.resolve({ ok: false }); h.controller.dispose(); }
 });
 
+test('accepted sends release the native send gate while delivery confirmation is pending', async () => {
+  const h = await setup({ transport: async () => ({ ok: true, pending: true, receipt: { route, text: '대기 중' } }) });
+  try {
+    assert.equal((await h.controller.sendMessage({ route, text: '대기 중' })).pending, true);
+    assert.equal(h.controller.getState().sending, false);
+    assert.equal((await h.controller.sendMessage({ route, text: '다음 메시지' })).ok, true);
+    assert.equal(h.calls.transport, 2, 'confirmation does not keep the insertion gate locked');
+  } finally { h.controller.dispose(); }
+});
+
 test('reloading the same route invalidates the pending send document permanently', async () => {
   const transport = deferred(); let sendContext;
   const h = await setup({ transport: args => { sendContext = args; return transport.promise; } });

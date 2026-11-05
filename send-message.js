@@ -97,7 +97,19 @@ async function transmitMessage({ request, wc, readSnapshot, readSendSnapshot = r
       if (observed.status === 'ambiguous') {
         return uncertain('전송된 메시지를 구분하지 못했습니다. 원래 화면에서 확인해주세요.');
       }
-      if (observed.status === 'confirmed') return { ok: true };
+      // Return the evidence even for an immediate acknowledgement. The code
+      // view coordinates it with earlier submissions so one late row cannot
+      // confirm two consecutive messages containing identical text.
+      if (observed.status === 'confirmed') return { ok: true, pending: false, receipt, confirmedRowId: observed.row.id };
+      // Discord has consumed this one deliberate submission, so release the
+      // native composer for the next message. This acknowledges handoff only:
+      // the code view retains the receipt/text and verifies delivery in the
+      // background. Never take this path for an unknown dispatch, stale room,
+      // unreadable draft, or a failure/ambiguity observed above.
+      if (current.routeReady === true && current.canSend === true && current.loggedIn !== false && !current.hasDialog &&
+          typeof current.draftText === 'string' && !normalize(current.draftText)) {
+        return { ok: true, pending: true, receipt };
+      }
     }
     return uncertain(DELAYED_RECEIPT);
   } catch {
