@@ -8,7 +8,7 @@ function registerBridge({ ipcMain, window, isLocalPage, controller }) {
   const routes = [
     [IPC.action, value => controller.action(value), () => false],
     [IPC.open, value => controller.openConversation(value), () => ({ ok: false, error: '대화를 열지 못했습니다.' })],
-    [IPC.send, value => controller.sendMessage(value), () => ({ ok: false, uncertain: true, error: '전송 상태를 확인하지 못했습니다. 원래 화면에서 확인해주세요.' })],
+    [IPC.send, value => controller.sendMessage(value), () => ({ ok: false, error: '전송 요청을 처리하지 못했습니다. 입력 내용은 그대로 남아 있습니다.' })],
     [IPC.history, value => controller.pageHistory(value), () => ({ ok: false })]
   ];
   for (const [channel, handle, failed] of routes) ipcMain.handle(channel, async (event, value) => {

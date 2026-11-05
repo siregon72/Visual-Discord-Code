@@ -224,13 +224,13 @@ test('send observations cannot restore old discovery after an account identity g
   } finally { gate.resolve({ ok: false }); h.controller.dispose(); }
 });
 
-test('accepted sends release the native send gate while delivery confirmation is pending', async () => {
-  const h = await setup({ transport: async () => ({ ok: true, pending: true, receipt: { route, text: '대기 중' } }) });
+test('dispatched sends release the native send gate without delivery confirmation', async () => {
+  const h = await setup({ transport: async () => ({ ok: true, submitted: true }) });
   try {
-    assert.equal((await h.controller.sendMessage({ route, text: '대기 중' })).pending, true);
+    assert.deepEqual(await h.controller.sendMessage({ route, text: '요청 전달' }), { ok: true, submitted: true });
     assert.equal(h.controller.getState().sending, false);
     assert.equal((await h.controller.sendMessage({ route, text: '다음 메시지' })).ok, true);
-    assert.equal(h.calls.transport, 2, 'confirmation does not keep the insertion gate locked');
+    assert.equal(h.calls.transport, 2, 'dispatch completion releases the insertion gate');
   } finally { h.controller.dispose(); }
 });
 

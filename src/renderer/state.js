@@ -82,7 +82,7 @@
     const model = {
       snapshot: emptySnapshot(),
       connection: { mode: 'code', connected: false, busy: true, error: '', loginRequired: true, sending: false, opening: false, clearing: false },
-      channels: new Map(), guilds: new Map(), drafts: new Map(), draftVersions: new Map(), uncertainties: new Set(), epoch: 0,
+      channels: new Map(), guilds: new Map(), drafts: new Map(), draftVersions: new Map(), epoch: 0,
       visit: null, liveMessageIds: new Set(),
       saveDraft(route, value) {
         if (!CHAT_ROUTE.test(route)) return;
@@ -97,7 +97,7 @@
         const reset = next.reset || AUTH_ROUTE.test(next.route);
         if (reset) {
           this.epoch++;
-          this.channels.clear(); this.guilds.clear(); this.drafts.clear(); this.draftVersions.clear(); this.uncertainties.clear();
+          this.channels.clear(); this.guilds.clear(); this.drafts.clear(); this.draftVersions.clear();
           currentDraft = '';
           if (!next.loggedIn || AUTH_ROUTE.test(next.route)) {
             next.title = ''; next.guildName = ''; next.rows = []; next.channels = []; next.guilds = [];
@@ -139,9 +139,11 @@
           state.mode === 'code' && state.ready !== false && !state.busy && !state.error &&
           !state.sending && !state.opening && !state.clearing && !manualHelp && !sending && !opening;
       },
+      canEdit(options = {}) {
+        return this.canReadHistory(options) && this.snapshot.canSend;
+      },
       canCompose(options = {}) {
-        const snap = this.snapshot;
-        return this.canReadHistory(options) && snap.canSend && !snap.draftText && !this.uncertainties.has(snap.route);
+        return this.canEdit(options) && !this.snapshot.draftText;
       }
     };
     return model;

@@ -1178,15 +1178,6 @@ input, textarea {
   }
 }
 
-.acknowledge, .restore-message, .dismiss-message {
-  margin-left:12px;
-  padding:3px 8px;
-  border:1px solid #6b5c3f;
-  color:#e0cfaa;
-  border-radius:2px;
-  font-size:11px;
-}
-
 .readme-content .readme-footer {
   margin-top:24px;
   color:#777;

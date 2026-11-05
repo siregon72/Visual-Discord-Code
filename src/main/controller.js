@@ -215,13 +215,13 @@ function createController({ window, createGuest, guestSession, dialog, openExter
     if (!isSendRequest(request)) return { ok: false, error: '메시지는 1~2,000자로 입력해주세요.' };
     if (!alive() || !window.isFocused() || state().mode !== 'code' || !ready || busy || error || !guestAlive(guest)) return { ok: false, error: '코드 채팅 창과 연결 상태를 확인한 뒤 다시 시도해주세요.' };
     const token = begin('send');
-    if (!token) return { ok: false, error: '대화 전환이나 전송을 확인하고 있습니다.' };
+    if (!token) return { ok: false, error: '대화 전환이나 전송을 처리하고 있습니다.' };
     const target = guest, epoch = guestEpoch, document = documentEpoch;
     const current = () => operationCurrent(token, target, epoch) && documentEpoch === document;
     try {
       const readSendSnapshot = async () => {
-        // Finish an earlier full read before the first send observation. While
-        // sending, polling yields to these smaller, current-room-only reads.
+        // Finish an earlier full read before the send preflight. While sending,
+        // polling yields to this current-room-only readiness check.
         if (pendingRead) await pendingRead.promise;
         if (!current()) throw new StaleGuestError();
         const raw = await invoke(target.webContents, 'sendSnapshot', [], current);
@@ -241,7 +241,7 @@ function createController({ window, createGuest, guestSession, dialog, openExter
         callAdapter: (method, ...args) => invoke(target.webContents, method, args, current), isCurrent: current,
         isFocused: () => window.isFocused() && target.webContents.isFocused(),
         focus: () => { if (!current()) throw new StaleGuestError(); window.focus(); target.webContents.focus(); } });
-    } catch { return { ok: false, uncertain: true, error: '전송 결과를 확인하지 못했습니다. 원래 화면에서 확인한 뒤 다시 보내세요.' }; }
+    } catch { return { ok: false, error: '전송 요청 처리 중 연결이 끊겼습니다. 입력 내용은 그대로 남아 있습니다.' }; }
     finally {
       finish(token);
       if (alive()) { window.webContents.focus(); runDetached(poll); }

@@ -53,7 +53,7 @@ test('snapshot reads rendered chats and messages without changing their text or 
   } finally { dom.window.close(); }
 });
 
-test('send snapshots preserve receipt and message data without rediscovering the Explorer', () => {
+test('send preflight snapshots preserve message data without rediscovering the Explorer', () => {
   const dom=makePage();
   try {
     const {document}=dom.window;
@@ -63,14 +63,14 @@ test('send snapshots preserve receipt and message data without rediscovering the
     const query=document.querySelectorAll.bind(document);
     document.querySelectorAll=selector=>{
       assert.ok(!selector.includes('guildsnav___') && selector !== 'a[href^="/channels/"]' && !selector.includes('nav[class*="guilds"]'),
-        'send confirmation must not rescan servers and channels');
+        'send preflight must not rescan servers and channels');
       return query(selector);
     };
-    const receipt=api.sendSnapshot();
+    const preflight=api.sendSnapshot();
     for (const field of ['loggedIn','accountId','route','rows','canSend','hasDialog','draftText','routeReady']) {
-      assert.deepEqual(receipt[field],full[field],field);
+      assert.deepEqual(preflight[field],full[field],field);
     }
-    assert.equal(receipt.rows[1].media.length,1,'the host can publish a receipt without dropping attachments');
+    assert.equal(preflight.rows[1].media.length,1,'the host can publish a preflight snapshot without dropping attachments');
     assert.equal(document.body.innerHTML,original);
     document.querySelector('form').setAttribute('aria-hidden','true');
     assert.equal(api.sendSnapshot().canSend,false,'each send snapshot rechecks live DOM state');
@@ -207,7 +207,7 @@ test('composer state distinguishes its active element from actual document focus
   } finally {dom.window.close();}
 });
 
-test('guarded submission reaches a bubbling editor listener once and still requires rendered confirmation', () => {
+test('guarded submission reaches a bubbling editor listener once without claiming a rendered message', () => {
   const dom=makePage();
   try {
     const {document}=dom.window;
@@ -225,7 +225,7 @@ test('guarded submission reaches a bubbling editor listener once and still requi
     assert.equal(unhandled.dispatched,true);
     assert.deepEqual(events.map(event=>event.type),['keydown','keypress','keyup']);
     assert.ok(events.every(event=>event.key==='Enter' && event.keyCode===13 && event.which===13 && event.bubbles && event.cancelable));
-    assert.equal(api.sendSnapshot().rows.length,before,'dispatch alone never creates a receipt');
+    assert.equal(api.sendSnapshot().rows.length,before,'dispatch alone never creates a message');
     assert.equal(composer.textContent,'전송할 내용','an unhandled Enter preserves the native draft');
 
     let submissions=0;

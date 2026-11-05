@@ -367,11 +367,10 @@
         }
       }
       composer.dispatchEvent(up);
-      // Dispatch is not delivery confirmation. The host still requires a new
-      // own message in the rendered conversation and a cleared native draft.
+      // Report key delivery only. The user checks the resulting conversation.
       return { ok: true, dispatched: true };
     } catch {
-      return { ok: false, dispatched, error: '입력창의 전송 결과를 확인하지 못했습니다.' };
+      return { ok: false, dispatched, error: '입력창에 전송 요청을 전달하는 중 오류가 발생했습니다.' };
     }
   }
 

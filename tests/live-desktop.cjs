@@ -91,7 +91,7 @@ app.whenReady().then(async () => {
     const displayedMessage=JSON.stringify(message).slice(1,-1);
     await until(()=>host.executeJavaScript(`document.getElementById('code-content').textContent.includes(${JSON.stringify(displayedMessage)})`));
     assert.equal(await host.executeJavaScript('!!document.getElementById("code-content").querySelector("b")'),false);
-    logger.log('PASS: code input -> Discord editor insertion/Enter -> acknowledged message -> code rendering');
+    logger.log('PASS: code input -> Discord editor insertion/Enter -> ordinary code rendering');
     await until(()=>host.executeJavaScript('!document.getElementById("message-input").disabled && document.activeElement===document.getElementById("message-input") && document.hasFocus()'));
     // Type the next draft without another click or focus call in either process.
     await host.insertText('클릭 없이 이어서 쓰는 다음 메시지');
@@ -130,22 +130,30 @@ app.whenReady().then(async () => {
     logger.log('PASS: wrong conversation and existing native draft cannot be sent over');
 
     // A real iframe navigation starts the aggregate loading spinner without
-    // replacing the Discord document or invalidating its pending send receipt.
+    // replacing the Discord document or invalidating an active submission.
     const frameNavigations=[];
     const observeFrame=details=>frameNavigations.push({main:details.isMainFrame,same:details.isSameDocument});
     guest.on('did-start-navigation',observeFrame);
     await guest.executeJavaScript('window.__delayAck=800;window.__delayClear=500');
     win.focus();host.focus();await until(()=>win.isFocused());
+    const nativeInsertText=guest.insertText.bind(guest);
+    let insertionStarted=false, releaseInsertion;
+    const insertionHold=new Promise(resolve=>{releaseInsertion=resolve;});
+    guest.insertText=async text=>{await nativeInsertText(text);insertionStarted=true;await insertionHold;};
     const frameSend=host.executeJavaScript(`window.vdc.sendMessage({text:'임베드 로딩 중 전송',route:${JSON.stringify(route)}})`,true);
-    await until(()=>guest.executeJavaScript('window.__sentTexts.length===2'));
+    await until(()=>insertionStarted);
     await guest.executeJavaScript(`{ const frame=document.createElement('iframe');frame.id='loading-embed';frame.srcdoc='<p>local embed fixture</p>';document.body.append(frame); }`);
     await until(()=>frameNavigations.some(event=>event.main===false));
-    assert.equal((await frameSend).ok,true,'embedded frame loading must not cancel send acknowledgement');
+    releaseInsertion();
+    const frameResult=await frameSend;
+    guest.insertText=nativeInsertText;
+    assert.equal(frameResult.ok,true,'embedded frame loading must not cancel the active submission');
+    assert.equal(frameResult.submitted,true);
     assert.equal(await guest.executeJavaScript('window.__enterCount'),2);
     guest.removeListener('did-start-navigation',observeFrame);
     await until(()=>guest.executeJavaScript('document.getElementById("messages").textContent.includes("임베드 로딩 중 전송")'));
     await guest.executeJavaScript(`window.__delayAck=0;window.__delayClear=0;document.getElementById('loading-embed').remove();`);
-    logger.log('PASS: real embedded-frame navigation preserves the active send and its acknowledgement');
+    logger.log('PASS: real embedded-frame navigation preserves the active submission');
 
     await host.executeJavaScript(`window.vdc.action('toggle-mode')`,true);
     assert.equal(view.getBounds().x,0);
@@ -191,27 +199,38 @@ app.whenReady().then(async () => {
     await until(()=>host.executeJavaScript('document.getElementById("message-input").value==="" && !document.getElementById("message-input").disabled'));
     assert.equal(await guest.executeJavaScript('window.__sentTexts[0]'),'**서식 있는 메시지**');
     assert.equal(await guest.executeJavaScript('window.__enterCount'),1);
-    logger.log('PASS: rendered Markdown acknowledges once and restores the composer');
+    logger.log('PASS: Markdown submission runs once and restores the composer');
 
-    await guest.executeJavaScript('window.__delayAck=10500;window.__renderBold=false');
+    await guest.executeJavaScript('window.__delayAck=3000;window.__renderBold=false');
+    let sendSnapshotReads=0;
+    const executeBeforeSend=guest.executeJavaScriptInIsolatedWorld.bind(guest);
+    guest.executeJavaScriptInIsolatedWorld=(world,scripts,...args)=>{
+      if(scripts.some(script=>script.code.includes('window.__vdcAdapter["sendSnapshot"]')))sendSnapshotReads++;
+      return executeBeforeSend(world,scripts,...args);
+    };
     const acceptedStart=Date.now();
     await host.executeJavaScript(`{
-      const input=document.getElementById('message-input');input.value='늦게 도착하는 전송 확인';
+      const input=document.getElementById('message-input');input.value='나중에 화면에 표시되는 메시지';
       input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();document.getElementById('composer').requestSubmit();
     }`,true);
     await until(()=>host.executeJavaScript('document.getElementById("message-input").value==="" && !document.getElementById("message-input").disabled && document.activeElement===document.getElementById("message-input")'),2000);
     const acceptedMs=Date.now()-acceptedStart;
-    assert.ok(acceptedMs<2000,'waiting for server confirmation must not lock the next draft');
-    assert.equal(await host.executeJavaScript('document.getElementById("connection-status").textContent'),'전송 확인 중 · 1건');
+    assert.ok(acceptedMs<2000,'submission must release the next draft without waiting for a rendered message');
+    assert.equal(sendSnapshotReads,1,'only the pre-send snapshot is needed');
+    assert.equal(await guest.executeJavaScript('document.getElementById("messages").textContent.includes("나중에 화면에 표시되는 메시지")'),false);
+    assert.equal(await host.executeJavaScript('document.getElementById("connection-status").textContent'),'Discord 연결됨');
     assert.equal(await host.executeJavaScript('document.getElementById("inline-status").hidden'),true);
-    await host.insertText('확인 중에도 작성하는 다음 초안');
-    assert.equal(await host.executeJavaScript('document.getElementById("message-input").value'),'확인 중에도 작성하는 다음 초안');
-    logger.log('PASS: next draft enabled in '+acceptedMs+'ms with a 10.5-second delayed receipt');
-    await until(()=>host.executeJavaScript('document.getElementById("connection-status").textContent==="Discord 연결됨"'));
-    assert.equal(await host.executeJavaScript('document.getElementById("message-input").value'),'확인 중에도 작성하는 다음 초안');
-    assert.equal(await guest.executeJavaScript('window.__enterCount'),2,'late receipt never resends');
+    await host.insertText('바로 이어서 작성하는 다음 초안');
+    assert.equal(await host.executeJavaScript('document.getElementById("message-input").value'),'바로 이어서 작성하는 다음 초안');
+    logger.log('PASS: next draft enabled in '+acceptedMs+'ms without result polling or confirmation status');
+    await until(()=>host.executeJavaScript('document.getElementById("code-content").textContent.includes("나중에 화면에 표시되는 메시지")'));
+    assert.equal(sendSnapshotReads,1,'late rendering must not trigger send-result reads');
+    guest.executeJavaScriptInIsolatedWorld=executeBeforeSend;
+    assert.equal(await host.executeJavaScript('document.getElementById("message-input").value'),'바로 이어서 작성하는 다음 초안');
+    assert.equal(await host.executeJavaScript('document.getElementById("connection-status").textContent'),'Discord 연결됨');
+    assert.equal(await guest.executeJavaScript('window.__enterCount'),2,'late rendering never resends');
     assert.equal(await host.executeJavaScript('document.getElementById("inline-status").hidden'),true);
-    logger.log('PASS: background confirmation preserves the next draft without native view or duplicate sends');
+    logger.log('PASS: ordinary message refresh preserves the next draft without confirmation prompts or duplicate sends');
     clearTimeout(timer);app.exit(0);
   } catch(error) {
     try {
