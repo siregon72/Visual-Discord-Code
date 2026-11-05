@@ -28,7 +28,7 @@ async function setup(options = {}) {
   function createGuest() {
     const wc = new EventEmitter();
     Object.assign(wc, { url: '', destroyed: false, getURL: () => wc.url, isDestroyed: () => wc.destroyed,
-      getUserAgent: () => 'Electron/45', setUserAgent() {}, setWindowOpenHandler() {}, focus() {},
+      getUserAgent: () => 'Electron/45', setUserAgent() {}, setWindowOpenHandler() {}, focus() {}, isFocused: () => true,
       loadURL: async url => { wc.url = url; }, reload: () => wc.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false }),
       close: () => { wc.destroyed = true; wc.emit('destroyed'); },
       navigationHistory: { canGoBack: () => false, canGoForward: () => false },
@@ -152,6 +152,76 @@ test('window disposal cancels transmission context without releasing it into a r
   transport.resolve({ ok: false, uncertain: true });
   assert.equal((await sending).ok, false);
   assert.equal(h.guests.length, 1);
+});
+
+test('send observations publish current messages without rescanning or losing conversation discovery', async () => {
+  const gate = deferred(); let context;
+  const h = await setup({ transport: args => { context = args; return gate.promise; } });
+  try {
+    const methods = [];
+    h.setBehavior(async method => {
+      methods.push(method);
+      assert.equal(method, 'sendSnapshot');
+      const { title, guildName, guilds, channels, ...observation } = snapshot();
+      return { ...observation, rows: [{ id: 'new', text: '빠른 확인', own: true, media: [] }] };
+    });
+    const sending = h.controller.sendMessage({ route, text: '빠른 확인' });
+    await h.controller.poll();
+    assert.deepEqual(methods, [], 'periodic full reads yield to the active send');
+    const observed = await context.readSendSnapshot();
+    assert.deepEqual(methods, ['sendSnapshot']);
+    assert.equal(observed.rows[0].text, '빠른 확인');
+    assert.equal(observed.title, '친구');
+    assert.equal(observed.channels.length, 2);
+    assert.equal(h.events.filter(event => event.channel === 'vdc:snapshot').at(-1).value.rows[0].id, 'new');
+    h.setBehavior(async () => snapshot());
+    gate.resolve({ ok: true });
+    assert.equal((await sending).ok, true);
+  } finally { gate.resolve({ ok: false }); h.controller.dispose(); }
+});
+
+test('send observations reject account changes and stale documents', async () => {
+  for (const change of ['account', 'navigation']) {
+    const gate = deferred(), read = deferred(); let context;
+    const h = await setup({ transport: args => { context = args; return gate.promise; } });
+    try {
+      h.setBehavior(() => read.promise);
+      const sending = h.controller.sendMessage({ route, text: '계정 보호' });
+      const observing = context.readSendSnapshot();
+      if (change === 'navigation') {
+        const wc = h.guests[0].webContents;
+        wc.url = 'https://discord.com' + laterRoute;
+        wc.emit('did-navigate-in-page', {}, wc.url, true);
+      }
+      read.resolve({ ...snapshot(), accountId: change === 'account' ? '200' : '100' });
+      await assert.rejects(observing, /changed/);
+      assert.equal(context.isCurrent(), false);
+      if (change === 'account') assert.ok(h.events.some(event => event.channel === 'vdc:snapshot' && event.value.reset));
+      gate.resolve({ ok: false }); await sending;
+    } finally { gate.resolve({ ok: false }); h.controller.dispose(); }
+  }
+});
+
+test('send observations cannot restore old discovery after an account identity gap', async () => {
+  const gate = deferred(); let context;
+  const h = await setup({ transport: args => { context = args; return gate.promise; } });
+  try {
+    h.setBehavior(async () => ({ ...snapshot(), accountId: '' }));
+    await h.controller.readSnapshot();
+    const sending = h.controller.sendMessage({ route, text: '계정 전환 확인' });
+    h.setBehavior(async () => {
+      const { title, guildName, guilds, channels, ...observation } = snapshot();
+      return { ...observation, accountId: '200' };
+    });
+    await assert.rejects(context.readSendSnapshot(), /changed/);
+    const reset = h.events.findLast(event => event.channel === 'vdc:snapshot' && event.value.reset);
+    assert.equal(reset.value.accountId, '200');
+    assert.deepEqual(reset.value.channels, [], 'the reset must not carry the previous account\'s conversations');
+    assert.deepEqual(reset.value.guilds, []);
+    gate.resolve({ ok: false }); await sending;
+    assert.equal((await h.controller.openConversation('route:' + laterRoute)).ok, false,
+      'old account routes must not be rediscovered from a merged send observation');
+  } finally { gate.resolve({ ok: false }); h.controller.dispose(); }
 });
 
 test('reloading the same route invalidates the pending send document permanently', async () => {

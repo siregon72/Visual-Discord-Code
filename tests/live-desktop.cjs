@@ -21,7 +21,9 @@ const fixture = `<!doctype html><html><head><meta charset="utf-8"><title>Discord
 </ol></div></div><form><div class="channelTextArea_123"><div role="textbox" contenteditable="true" data-slate-editor="true" class="slateTextArea_123" tabindex="0"><p><br></p></div></div></form></main>
 <script>
 history.replaceState({}, '', '${route}');
-window.__sentTexts=[]; window.__enterCount=0; window.__delayAck=0;
+window.__sentTexts=[]; window.__enterCount=0; window.__delayAck=0; window.__renderBold=false;
+window.__inputLog=[];
+for(const type of ['focus','blur','keydown','keyup','keypress'])window.addEventListener(type,event=>window.__inputLog.push({type,key:event.key,focused:document.hasFocus(),active:document.activeElement?.getAttribute('role')}),true);
 const composer=document.querySelector('[data-slate-editor]');
 document.querySelectorAll('a[href]').forEach(link=>link.addEventListener('click',event=>{event.preventDefault();history.pushState({},'',link.getAttribute('href'));}));
 composer.addEventListener('keydown',event=>{
@@ -29,7 +31,7 @@ composer.addEventListener('keydown',event=>{
   event.preventDefault(); window.__enterCount++;
   const text=composer.innerText.trim(); if(!text)return;
   window.__sentTexts.push(text); composer.innerHTML='<p><br></p>';
-  const add=()=>{const id=Math.max(900,...[...document.querySelectorAll('[id^="chat-messages-123-"]')].map(row=>Number(row.id.split('-').at(-1))||0))+1;const row=document.createElement('li');row.id='chat-messages-123-'+id;const h=document.createElement('h3');const n=document.createElement('span');n.id='message-username-'+id;n.textContent='테스트 사용자';h.append(n);const c=document.createElement('div');c.id='message-content-'+id;c.textContent=text;row.append(h,c);document.getElementById('messages').append(row);};
+  const add=()=>{const id=Math.max(900,...[...document.querySelectorAll('[id^="chat-messages-123-"]')].map(row=>Number(row.id.split('-').at(-1))||0))+1;const row=document.createElement('li');row.id='chat-messages-123-'+id;const h=document.createElement('h3');const n=document.createElement('span');n.id='message-username-'+id;n.textContent='테스트 사용자';h.append(n);const time=document.createElement('time');time.dateTime=new Date().toISOString();h.append(time);const c=document.createElement('div');c.id='message-content-'+id;c.textContent=window.__renderBold&&text.startsWith('**')&&text.endsWith('**')?text.slice(2,-2):text;row.append(h,c);document.getElementById('messages').append(row);};
   if(window.__delayAck)setTimeout(add,window.__delayAck);else add();
 });
 </script></body></html>`;
@@ -37,7 +39,7 @@ composer.addEventListener('keydown',event=>{
 app.whenReady().then(() => {
   session.fromPartition('persist:visual-discord-code').protocol.handle('https', () => new Response(fixture, { headers:{'content-type':'text/html; charset=utf-8'} }));
 });
-require('../main');
+require(path.join(process.env.VDC_APP_ROOT || path.resolve(__dirname, '..'), 'main.js'));
 const delay = ms => new Promise(resolve => setTimeout(resolve,ms));
 const timer = setTimeout(() => {
   try { logger.error('Live integration timed out'); } finally { app.exit(1); }
@@ -72,7 +74,7 @@ app.whenReady().then(async () => {
     await host.executeJavaScript(`document.getElementById('file-names-toggle').click();`,true);
     assert.equal(await host.executeJavaScript('document.getElementById("tab-label").textContent'),'테스트 친구.tsx');
     logger.log('PASS: Explorer aliases match tab, persist through renderer reload, and toggle back');
-    fs.writeFileSync(path.join(artifactDir,'live-editor-before-send.png'),(await host.capturePage()).toPNG());
+    fs.writeFileSync(path.join(artifactDir,'live-editor-before-send.png'),(await until(()=>host.capturePage())).toPNG());
     await until(()=>host.executeJavaScript('!document.getElementById("message-input").disabled'));
     await host.executeJavaScript('window.__historyNode = document.querySelector(".code-block[data-message-id=\\"chat-messages-123-900\\"]");');
     win.focus();host.focus();await until(()=>win.isFocused());
@@ -87,7 +89,7 @@ app.whenReady().then(async () => {
     const displayedMessage=JSON.stringify(message).slice(1,-1);
     await until(()=>host.executeJavaScript(`document.getElementById('code-content').textContent.includes(${JSON.stringify(displayedMessage)})`));
     assert.equal(await host.executeJavaScript('!!document.getElementById("code-content").querySelector("b")'),false);
-    logger.log('PASS: code input -> native insertText/Enter -> acknowledged message -> code rendering');
+    logger.log('PASS: code input -> Discord editor insertion/Enter -> acknowledged message -> code rendering');
     await until(()=>host.executeJavaScript('!document.getElementById("message-input").disabled && document.activeElement===document.getElementById("message-input") && document.hasFocus()'));
     // Type the next draft without another click or focus call in either process.
     await host.insertText('클릭 없이 이어서 쓰는 다음 메시지');
@@ -105,7 +107,7 @@ app.whenReady().then(async () => {
     await until(()=>host.executeJavaScript('document.querySelectorAll(".new-messages .live-message").length===2'));
     assert.equal(await host.executeJavaScript('document.querySelectorAll(".new-messages .live-message .code-row").length'),2);
     assert.equal(await host.executeJavaScript('window.__historyNode === document.querySelector(".code-block[data-message-id=\\"chat-messages-123-900\\"]")'),true);
-    fs.writeFileSync(path.join(artifactDir,'live-compact-messages.png'),(await host.capturePage()).toPNG());
+    fs.writeFileSync(path.join(artifactDir,'live-compact-messages.png'),(await until(()=>host.capturePage())).toPNG());
     await guest.executeJavaScript(`window.__savedMessages=document.getElementById('messages').innerHTML;document.getElementById('messages').replaceChildren();history.pushState({},'','/channels/@me/456');`);
     await until(()=>host.executeJavaScript('document.getElementById("tab-label").textContent==="다른 대화.tsx"'));
     await guest.executeJavaScript(`document.getElementById('messages').innerHTML=window.__savedMessages;history.pushState({},'',${JSON.stringify(route)});`);
@@ -147,9 +149,9 @@ app.whenReady().then(async () => {
     await host.executeJavaScript(`window.vdc.action('toggle-mode')`,true);
     assert.ok(view.getBounds().x >= win.getContentSize()[0]);
     await delay(250);
-    fs.writeFileSync(path.join(artifactDir,'live-editor-fixture.png'),(await host.capturePage()).toPNG());
+    fs.writeFileSync(path.join(artifactDir,'live-editor-fixture.png'),(await until(()=>host.capturePage())).toPNG());
     await host.executeJavaScript(`document.getElementById('file-names-toggle').click();`,true);
-    fs.writeFileSync(path.join(artifactDir,'live-file-names.png'),(await host.capturePage()).toPNG());
+    fs.writeFileSync(path.join(artifactDir,'live-file-names.png'),(await until(()=>host.capturePage())).toPNG());
     logger.log('PASS: full code UI and original Discord view toggle');
     let backgroundReads=0;
     const originalExecute=guest.executeJavaScriptInIsolatedWorld.bind(guest);
@@ -177,6 +179,28 @@ app.whenReady().then(async () => {
     assert.equal(await host.executeJavaScript('document.getElementById("message-input").value'),'새로고침에도 보존할 초안');
     guest.removeListener('did-start-navigation',observeReload);
     logger.log('PASS: standard reload shortcut refreshes Discord while preserving the code renderer and draft');
+
+    await guest.executeJavaScript('window.__renderBold=true');
+    await host.executeJavaScript(`{
+      const input=document.getElementById('message-input');input.value='**서식 있는 메시지**';
+      input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();document.getElementById('composer').requestSubmit();
+    }`,true);
+    await until(()=>host.executeJavaScript('document.getElementById("message-input").value==="" && !document.getElementById("message-input").disabled'));
+    assert.equal(await guest.executeJavaScript('window.__sentTexts[0]'),'**서식 있는 메시지**');
+    assert.equal(await guest.executeJavaScript('window.__enterCount'),1);
+    logger.log('PASS: rendered Markdown acknowledges once and restores the composer');
+
+    await guest.executeJavaScript('window.__delayAck=10500;window.__renderBold=false');
+    await host.executeJavaScript(`{
+      const input=document.getElementById('message-input');input.value='늦게 도착하는 전송 확인';
+      input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();document.getElementById('composer').requestSubmit();
+    }`,true);
+    await until(()=>host.executeJavaScript('document.getElementById("inline-status").textContent.includes("자동으로")'));
+    assert.equal(await host.executeJavaScript('document.getElementById("message-input").value'),'늦게 도착하는 전송 확인');
+    await until(()=>host.executeJavaScript('document.getElementById("message-input").value==="" && !document.getElementById("message-input").disabled'));
+    assert.equal(await guest.executeJavaScript('window.__enterCount'),2,'late receipt never resends');
+    assert.equal(await host.executeJavaScript('document.getElementById("inline-status").hidden'),true);
+    logger.log('PASS: late confirmation automatically unlocks the composer without native view or duplicate sends');
     clearTimeout(timer);app.exit(0);
   } catch(error) {
     try {
@@ -186,7 +210,10 @@ app.whenReady().then(async () => {
         logger.error('Window:',JSON.stringify({visible:failedWindow.isVisible(),minimized:failedWindow.isMinimized(),focused:failedWindow.isFocused()}));
         logger.error('Rendered:',await failedWindow.webContents.executeJavaScript('JSON.stringify({live:document.querySelectorAll(".live-message").length,status:document.getElementById("connection-status")?.textContent,error:document.getElementById("inline-status")?.textContent})').catch(()=>''));
         const failedGuest=failedWindow.contentView.children[0]?.webContents;
-        if(failedGuest&&!failedGuest.isDestroyed())logger.error('Guest fixture:',await failedGuest.executeJavaScriptInIsolatedWorld(1001,[{code:'JSON.stringify(window.__vdcAdapter?.snapshot())'}]).catch(()=>''));
+        if(failedGuest&&!failedGuest.isDestroyed()) {
+          logger.error('Guest fixture:',await failedGuest.executeJavaScriptInIsolatedWorld(1001,[{code:'JSON.stringify(window.__vdcAdapter?.snapshot())'}]).catch(()=>''));
+          logger.error('Native events:',await failedGuest.executeJavaScript('JSON.stringify({enters:window.__enterCount,sent:window.__sentTexts,focused:document.hasFocus(),events:window.__inputLog})').catch(()=>''));
+        }
       }
     } finally {
       clearTimeout(timer);app.exit(1);

@@ -7,13 +7,16 @@
   const fileNames = createFileNames();
   const collapsed = new Set();
   const cleanups = [];
+  const recoverableSends = new Map();
+  const recoveryNotice = '전송 확인이 지연되고 있습니다. 확인되면 자동으로 입력을 다시 사용할 수 있습니다.';
+  const unresolvedNotice = '전송 여부가 불확실합니다. 대화에 표시된 내용을 확인한 뒤 입력을 다시 사용해 주세요.';
   let snap = model.snapshot;
   let state = model.connection;
   let level = 2, lines = 0;
   let manualHelp = false, composing = false, disposed = false;
   let pendingSend = null, pendingOpen = null, pendingHistory = null;
   let pendingComposerFocus = null;
-  let toastTimer, historyTimer;
+  let toastTimer, historyTimer, recoveryTimer;
   let codeSignature = '', sendError = '', readError = '';
   let codeCache = null;
 
@@ -49,7 +52,7 @@
     const token = pendingComposerFocus;
     if (!token) return;
     if (!current(token) || snap.route !== token.route || manualHelp || state.mode !== 'code' ||
-      !snap.loggedIn || snap.hasDialog || model.uncertainties.has(token.route)) {
+      !snap.loggedIn || snap.hasDialog || (model.uncertainties.has(token.route) && !recoverableSends.has(token.route))) {
       pendingComposerFocus = null;
       return;
     }
@@ -77,8 +80,8 @@
     document.querySelector('.statusbar').classList.toggle('disconnected', !snap.loggedIn);
     $('message-input').disabled = !canCompose();
     $('send').disabled = !canCompose() || !$('message-input').value.trim();
-    let notice = error || sendError;
-    if (!notice && model.uncertainties.has(snap.route)) notice = '전송 결과를 확인하지 못했습니다. 원래 화면에서 확인한 뒤 입력 내용을 직접 정리해 주세요.';
+    let notice = error || (recoverableSends.has(snap.route) ? recoveryNotice : sendError);
+    if (!notice && model.uncertainties.has(snap.route)) notice = unresolvedNotice;
     if (!notice && snap.hasDialog && state.mode === 'code') notice = 'Discord에 확인할 창이 열려 있습니다. 오른쪽 위 원래 화면에서 확인해 주세요.';
     if (!notice && snap.draftText && !sending) notice = '원래 Discord 입력창에 작성 중인 내용이 있습니다. 원래 화면에서 내용을 먼저 확인해 주세요.';
     $('inline-status').replaceChildren();
@@ -86,7 +89,7 @@
     if (model.uncertainties.has(snap.route)) {
       const checked = document.createElement('button');
       checked.textContent = '확인 후 입력 다시 사용'; checked.className = 'acknowledge';
-      checked.addEventListener('click', () => { model.uncertainties.delete(snap.route); sendError = ''; updateStatus(); $('message-input').focus(); });
+      checked.addEventListener('click', () => { model.uncertainties.delete(snap.route); recoverableSends.delete(snap.route); sendError = ''; updateStatus(); $('message-input').focus(); });
       $('inline-status').append(checked);
     }
     $('inline-status').hidden = !notice;
@@ -179,6 +182,41 @@
   function toggleWrap() { document.querySelector('.editor').classList.toggle('wrap-lines'); syncLayout(); }
   function density() { level = [0, 2, 4, 8][([0, 2, 4, 8].indexOf(level) + 1) % 4]; $('spaces').textContent = `Spaces: ${level}`; renderCode(false, true); }
 
+  function completeSend(token, text) {
+    if (!current(token)) return;
+    const route = token.route, input = $('message-input');
+    model.uncertainties.delete(route); recoverableSends.delete(route);
+    if (model.draftVersions.get(route) === token.revision && model.drafts.get(route) === text) {
+      model.saveDraft(route, '');
+      if (snap.route === route && input.value === text) { input.value = ''; resizeInput(); }
+    }
+    if (snap.route === route) {
+      if ($('toast').textContent === sendError) { clearTimeout(toastTimer); $('toast').hidden = true; }
+      sendError = '';
+      $('code-scroll').scrollTop = $('code-scroll').scrollHeight;
+    }
+  }
+
+  function reconcileSend() {
+    clearTimeout(recoveryTimer);
+    let nextExpiry = Infinity;
+    for (const [route, entry] of recoverableSends) {
+      // A much later, unrelated message with identical text is not a receipt.
+      const remaining = entry.receipt.startedAt + 60000 - Date.now();
+      if (!current(entry.token) || remaining <= 0 || !model.uncertainties.has(route)) {
+        if (current(entry.token) && route === snap.route && model.uncertainties.has(route)) sendError = unresolvedNotice;
+        recoverableSends.delete(route); continue;
+      }
+      if (route === snap.route && snap.loggedIn && snap.routeReady) {
+        const result = window.VDCSendReceipt.observeReceipt(entry.receipt, snap);
+        if (result.status === 'confirmed') { completeSend(entry.token, entry.text); continue; }
+        if (['failed', 'ambiguous', 'changed'].includes(result.status)) { sendError = unresolvedNotice; recoverableSends.delete(route); continue; }
+      }
+      nextExpiry = Math.min(nextExpiry, remaining);
+    }
+    if (Number.isFinite(nextExpiry)) recoveryTimer = setTimeout(() => { reconcileSend(); if (!disposed) updateStatus(); }, nextExpiry + 1);
+  }
+
   function receiveSnapshot(value) {
     if (disposed) return;
     const change = model.receiveSnapshot(value, $('message-input').value);
@@ -192,8 +230,10 @@
     }
     if (change.reset) {
       pendingSend = null; pendingOpen = null; collapsed.clear();
+      recoverableSends.clear(); clearTimeout(recoveryTimer);
       clearTimeout(toastTimer); $('toast').hidden = true;
     }
+    reconcileSend();
     renderTree(); renderCode(change.routeChanged); updateStatus();
   }
   function receiveState(value) {
@@ -215,16 +255,17 @@
       const result = await api.sendMessage({ text, route });
       if (!current(token)) return;
       if (result?.ok) {
-        if (model.draftVersions.get(route) === token.revision && model.drafts.get(route) === text) {
-          model.saveDraft(route, '');
-          if (snap.route === route && input.value === text) { input.value = ''; resizeInput(); }
-        }
-        if (snap.route === route) $('code-scroll').scrollTop = $('code-scroll').scrollHeight;
+        completeSend(token, text);
       } else {
         if (result?.uncertain) model.uncertainties.add(route);
         const message = typeof result?.error === 'string' ? result.error : '전송하지 못했습니다. 입력 내용은 그대로 남아 있습니다.';
         if (snap.route === route) sendError = message;
-        toast(message);
+        if (result?.uncertain && result.submitted === true && result.receipt?.route === route && result.receipt.text === text &&
+          Number.isFinite(result.receipt.startedAt) && window.VDCSendReceipt) {
+          recoverableSends.set(route, { token, text, receipt: result.receipt });
+          reconcileSend();
+        }
+        if ((!recoverableSends.has(route) && model.uncertainties.has(route)) || !result?.uncertain) toast(snap.route === route ? sendError || message : message);
       }
     } catch {
       if (!current(token)) return;
@@ -303,7 +344,7 @@
   listen($('code-scroll'), 'scroll', hidePreview);
   for (const unsubscribe of [api?.onSnapshot?.(receiveSnapshot), api?.onState?.(receiveState)]) if (typeof unsubscribe === 'function') cleanups.push(unsubscribe);
   listen(window, 'beforeunload', () => {
-    disposed = true; pendingComposerFocus = null; clearTimeout(toastTimer); clearTimeout(historyTimer);
+    disposed = true; pendingComposerFocus = null; recoverableSends.clear(); clearTimeout(recoveryTimer); clearTimeout(toastTimer); clearTimeout(historyTimer);
     for (const cleanup of cleanups) cleanup();
   }, { once: true });
   renderTree(); renderCode(); updateStatus();

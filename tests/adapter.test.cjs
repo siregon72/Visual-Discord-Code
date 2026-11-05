@@ -53,6 +53,77 @@ test('snapshot reads rendered chats and messages without changing their text or 
   } finally { dom.window.close(); }
 });
 
+test('send snapshots preserve receipt and message data without rediscovering the Explorer', () => {
+  const dom=makePage();
+  try {
+    const {document}=dom.window;
+    const api=dom.window.__vdcAdapter;
+    const full=api.snapshot();
+    const original=document.body.innerHTML;
+    const query=document.querySelectorAll.bind(document);
+    document.querySelectorAll=selector=>{
+      assert.ok(!selector.includes('guildsnav___') && selector !== 'a[href^="/channels/"]' && !selector.includes('nav[class*="guilds"]'),
+        'send confirmation must not rescan servers and channels');
+      return query(selector);
+    };
+    const receipt=api.sendSnapshot();
+    for (const field of ['loggedIn','accountId','route','rows','canSend','hasDialog','draftText','routeReady']) {
+      assert.deepEqual(receipt[field],full[field],field);
+    }
+    assert.equal(receipt.rows[1].media.length,1,'the host can publish a receipt without dropping attachments');
+    assert.equal(document.body.innerHTML,original);
+    document.querySelector('form').setAttribute('aria-hidden','true');
+    assert.equal(api.sendSnapshot().canSend,false,'each send snapshot rechecks live DOM state');
+    dom.window.history.pushState({},'','/channels/100/201');
+    assert.equal(api.sendSnapshot().routeReady,false);
+    assert.equal(api.sendSnapshot().rows.length,0);
+  } finally {dom.window.close();}
+});
+
+test('compact rows use explicit rendered author IDs without trusting matching display names', () => {
+  const dom=makePage();
+  try {
+    const {document}=dom.window;
+    const api=dom.window.__vdcAdapter;
+    const self=document.querySelector('#chat-messages-200-1003');
+    assert.equal(api.snapshot().rows[2].own,false,'a matching display name alone is not account-ID evidence');
+    self.setAttribute('data-author-id','999');
+    assert.equal(api.sendSnapshot().rows[2].own,true);
+    self.setAttribute('data-author-id','888');
+    assert.equal(api.sendSnapshot().rows[2].own,false,'a different ID wins over an identical name');
+    self.removeAttribute('data-author-id');
+    self.querySelector('[id^="message-content-"]').insertAdjacentHTML('beforeend','<span data-author-id="999">인용된 사용자</span>');
+    self.insertAdjacentHTML('afterbegin','<div class="repliedMessage_123" data-author-id="999"><img class="avatar_123" src="https://cdn.discordapp.com/avatars/999/self.png"></div>');
+    assert.equal(api.sendSnapshot().rows[2].own,false,'message content and reply previews are not author identity');
+    self.setAttribute('data-author-id','999');
+    self.querySelector('h3').insertAdjacentHTML('afterbegin','<img class="avatar_123" src="https://cdn.discordapp.com/avatars/888/other.png">');
+    assert.equal(api.sendSnapshot().rows[2].own,false,'conflicting explicit IDs remain ambiguous');
+  } finally {dom.window.close();}
+});
+
+test('grouped rows resolve explicit author labels only within the visible channel', () => {
+  const dom=makePage();
+  try {
+    const {document}=dom.window;
+    const api=dom.window.__vdcAdapter;
+    const list=document.querySelector('[data-list-id="chat-messages"]');
+    const self=document.querySelector('#chat-messages-200-1003');
+    self.setAttribute('data-author-id','999');
+    list.insertAdjacentHTML('beforeend',
+      '<li id="chat-messages-200-1004" data-author-id="888"><h3><span id="message-username-1004">다른 사람</span></h3><div id="message-content-1004">다른 메시지</div></li>'+
+      '<li id="chat-messages-200-1005" aria-labelledby="message-username-1003 message-content-1005"><div id="message-content-1005">연속된 내 메시지</div></li>');
+    let row=api.sendSnapshot().rows.at(-1);
+    assert.equal(row.own,true);
+    assert.equal(row.author,'나');
+    document.querySelector('#message-username-1003').hidden=true;
+    row=api.sendSnapshot().rows.at(-1);
+    assert.equal(row.own,false,'hidden author references cannot confirm ownership');
+    assert.equal(row.author,'메시지');
+    document.querySelector('#chat-messages-200-1005').setAttribute('aria-labelledby','message-username-missing');
+    assert.equal(api.sendSnapshot().rows.at(-1).own,false,'unresolved author labels cannot inherit a different preceding author');
+  } finally {dom.window.close();}
+});
+
 test('hidden ancestor panels and ambiguous visible editors cannot receive a send', () => {
   const dom=makePage();
   try {
@@ -119,6 +190,155 @@ test('focus side effects are rechecked before the composer is reported ready', (
     composer.addEventListener('focus',()=>dom.window.history.pushState({},'','/channels/100/201'));
     assert.equal(dom.window.__vdcAdapter.focusComposer(route).ok,false);
     assert.equal(dom.window.__vdcAdapter.scroll(0,route).ok,false);
+  } finally {dom.window.close();}
+});
+
+test('composer state distinguishes its active element from actual document focus', () => {
+  const dom=makePage();
+  try {
+    const {document}=dom.window;
+    const api=dom.window.__vdcAdapter;
+    assert.equal(api.focusComposer(route).ok,true);
+    assert.equal(api.composerState(route).documentFocused,true);
+    document.hasFocus=()=>false;
+    const state=api.composerState(route);
+    assert.equal(state.focused,true,'the active editor can remain selected after native focus leaves');
+    assert.equal(state.documentFocused,false,'the sender must also check real document focus before Enter');
+  } finally {dom.window.close();}
+});
+
+test('guarded submission reaches a bubbling editor listener once and still requires rendered confirmation', () => {
+  const dom=makePage();
+  try {
+    const {document}=dom.window;
+    const api=dom.window.__vdcAdapter;
+    const composer=document.querySelector('[data-slate-editor]');
+    api.focusComposer(route);
+    composer.textContent='전송할 내용';
+    const events=[];
+    for (const type of ['keydown','keypress','keyup']) document.addEventListener(type,event=>{
+      events.push({type:event.type,key:event.key,keyCode:event.keyCode,which:event.which,bubbles:event.bubbles,cancelable:event.cancelable});
+    });
+    const before=api.sendSnapshot().rows.length;
+    const unhandled=api.submitComposer(route,'전송할 내용');
+    assert.equal(unhandled.ok,true);
+    assert.equal(unhandled.dispatched,true);
+    assert.deepEqual(events.map(event=>event.type),['keydown','keypress','keyup']);
+    assert.ok(events.every(event=>event.key==='Enter' && event.keyCode===13 && event.which===13 && event.bubbles && event.cancelable));
+    assert.equal(api.sendSnapshot().rows.length,before,'dispatch alone never creates a receipt');
+    assert.equal(composer.textContent,'전송할 내용','an unhandled Enter preserves the native draft');
+
+    let submissions=0;
+    document.addEventListener('keydown',event=>{
+      if (event.target!==composer || event.key!=='Enter') return;
+      event.preventDefault(); submissions++;
+      document.querySelector('[data-list-id="chat-messages"]').insertAdjacentHTML('beforeend',
+        '<li id="chat-messages-200-1004" data-author-id="999"><div id="message-content-1004">전송할 내용</div></li>');
+      composer.textContent='';
+    });
+    events.length=0;
+    assert.equal(api.submitComposer(route,'전송할 내용').ok,true);
+    assert.equal(submissions,1,'a React-style delegated keydown handler receives exactly one submission');
+    assert.deepEqual(events.map(event=>event.type),['keydown','keyup']);
+    assert.equal(api.sendSnapshot().rows.at(-1).own,true);
+    assert.equal(api.sendSnapshot().draftText,'');
+  } finally {dom.window.close();}
+});
+
+test('guarded submission supports keypress editors without duplicating a keydown submission', () => {
+  for (const submitOn of ['keypress','keydown']) {
+    const dom=makePage();
+    try {
+      const {document}=dom.window;
+      const api=dom.window.__vdcAdapter;
+      const composer=document.querySelector('[data-slate-editor]');
+      api.focusComposer(route); composer.textContent='전송';
+      const events=[];
+      let submissions=0;
+      for (const type of ['keydown','keypress','keyup']) document.addEventListener(type,event=>{
+        events.push(event.type);
+        if (event.type===submitOn) {
+          if (event.type==='keypress') assert.equal(event.charCode,13);
+          submissions++;
+          // Deliberately do not preventDefault: clearing the consumed draft is
+          // also evidence not to deliver a subsequent keypress submission.
+          composer.textContent='';
+        }
+      });
+      assert.equal(api.submitComposer(route,'전송').ok,true);
+      assert.equal(submissions,1);
+      assert.deepEqual(events,submitOn==='keypress'?['keydown','keypress','keyup']:['keydown','keyup']);
+    } finally {dom.window.close();}
+  }
+});
+
+test('a keydown route or dialog transition cannot forward keypress into the changed editor', () => {
+  for (const transition of ['route','dialog']) {
+    const dom=makePage();
+    try {
+      const {document}=dom.window;
+      const api=dom.window.__vdcAdapter;
+      const composer=document.querySelector('[data-slate-editor]');
+      api.focusComposer(route); composer.textContent='전송';
+      let keypresses=0;
+      document.addEventListener('keydown',()=>{
+        if (transition==='route') dom.window.history.pushState({},'','/channels/100/201');
+        else document.body.insertAdjacentHTML('beforeend','<div role="dialog">확인</div>');
+      });
+      document.addEventListener('keypress',()=>keypresses++);
+      assert.equal(api.submitComposer(route,'전송').dispatched,true);
+      assert.equal(keypresses,0);
+      assert.equal(composer.textContent,'전송');
+    } finally {dom.window.close();}
+  }
+});
+
+test('guarded submission rejects changed drafts, routes, focus, dialogs and ambiguous editors before Enter', () => {
+  const cases=[
+    ({api})=>api.submitComposer('/channels/100/201','보낼 내용'),
+    ({api})=>api.submitComposer(route,''),
+    ({api})=>api.submitComposer(route,'x'.repeat(2001)),
+    ({api})=>api.submitComposer(route,'다른 내용'),
+    ({api,composer})=>{composer.blur();return api.submitComposer(route,'보낼 내용');},
+    ({api,document})=>{document.querySelector('form').hidden=true;return api.submitComposer(route,'보낼 내용');},
+    ({api,document})=>{document.querySelector('main').append(document.querySelector('form').cloneNode(true));return api.submitComposer(route,'보낼 내용');},
+    ({api,document})=>{document.body.insertAdjacentHTML('beforeend','<div role="dialog">확인</div>');return api.submitComposer(route,'보낼 내용');},
+    ({api,dom})=>{dom.window.history.pushState({},'','/channels/100/201');return api.submitComposer('/channels/100/201','보낼 내용');}
+  ];
+  for (const invoke of cases) {
+    const dom=makePage();
+    try {
+      const {document}=dom.window;
+      const api=dom.window.__vdcAdapter;
+      const composer=document.querySelector('[data-slate-editor]');
+      api.focusComposer(route); composer.textContent='보낼 내용';
+      let keys=0;document.addEventListener('keydown',()=>keys++);
+      const result=invoke({api,composer,document,dom});
+      assert.equal(result.ok,false);
+      assert.equal(result.dispatched,false);
+      assert.equal(keys,0);
+      assert.equal(composer.textContent,'보낼 내용','rejection must preserve the existing draft');
+    } finally {dom.window.close();}
+  }
+});
+
+test('guarded submission normalizes only rendered whitespace and reports partial dispatch as uncertain', () => {
+  const dom=makePage();
+  try {
+    const {document}=dom.window;
+    const api=dom.window.__vdcAdapter;
+    const composer=document.querySelector('[data-slate-editor]');
+    api.focusComposer(route);
+    composer.innerHTML='<p>첫\u00a0줄</p><p>둘째 줄</p>';
+    const dispatch=composer.dispatchEvent.bind(composer);
+    let keys=0;
+    document.addEventListener('keydown',()=>keys++);
+    composer.dispatchEvent=event=>{dispatch(event);throw new Error('handler bridge failed after dispatch');};
+    const result=api.submitComposer(route,'첫 줄\r\n둘째 줄');
+    assert.equal(result.ok,false);
+    assert.equal(result.dispatched,true,'a dispatched key must never be treated as safe to retry');
+    assert.equal(keys,1);
+    assert.equal(api.composerState(route).text,'첫\u00a0줄\n둘째 줄');
   } finally {dom.window.close();}
 });
 

@@ -1,6 +1,6 @@
 'use strict';
 
-const METHODS = new Set(['snapshot', 'open', 'focusComposer', 'composerState', 'scroll']);
+const METHODS = new Set(['snapshot', 'sendSnapshot', 'open', 'focusComposer', 'composerState', 'submitComposer', 'scroll']);
 
 class StaleGuestError extends Error {
   constructor() { super('Discord document changed'); this.name = 'StaleGuestError'; }

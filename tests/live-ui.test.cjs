@@ -283,6 +283,166 @@ test('failed and uncertain sends preserve the draft instead of claiming success'
   } finally { ui.dom.window.close(); }
 });
 
+function delayedReceipt(ui, message, startedAt = Date.now()) {
+  return {
+    ok: false, uncertain: true, submitted: true, error: '전송 확인이 지연되고 있습니다. 확인되면 자동으로 입력창이 다시 열립니다.',
+    receipt: ui.dom.window.VDCSendReceipt.createReceipt({ route: routeA, text: message, startedAt, rows: snapshot().rows })
+  };
+}
+
+function sentRow(message, changes = {}) {
+  return { id: 'new-own-message', author: '나', text: message, time: new Date().toISOString(), own: true, media: [], ...changes };
+}
+
+test('a delayed confirmed message automatically releases the composer without resending or opening the native view', async () => {
+  const ui = makeUI();
+  try {
+    const document = ui.dom.window.document, message = '**늦게 확인된 메시지**';
+    const focus = observeComposerFocus(ui);
+    ui.type(message); ui.submit(); blurDisabledComposer(ui);
+    ui.sends[0].resolve(delayedReceipt(ui, message)); await tick();
+    assert.equal(ui.input.disabled, true);
+    assert.equal(ui.input.value, message);
+    assert.match(document.getElementById('inline-status').textContent, /자동으로/);
+    assert.equal(document.getElementById('toast').hidden, true, 'slow confirmation is shown inline without an extra warning');
+
+    ui.callbacks.snapshot({ ...snapshot(), rows: [...snapshot().rows, sentRow('늦게 확인된 메시지')] });
+    assert.equal(ui.input.disabled, false);
+    assert.equal(ui.input.value, '');
+    assert.equal(document.getElementById('inline-status').hidden, true);
+    assert.strictEqual(document.activeElement, ui.input);
+    assert.equal(focus.calls, 1);
+    assert.equal(ui.sends.length, 1);
+    assert.ok(!ui.actions.includes('toggle-mode'));
+  } finally { ui.dom.window.close(); }
+});
+
+test('a receipt already visible before the timeout response clears the draft without a stale warning', async () => {
+  const ui = makeUI();
+  try {
+    const message = '응답보다 먼저 도착한 메시지';
+    ui.type(message); ui.submit();
+    ui.callbacks.snapshot({ ...snapshot(), rows: [...snapshot().rows, sentRow(message)] });
+    ui.sends[0].resolve(delayedReceipt(ui, message)); await tick();
+    assert.equal(ui.input.value, '');
+    assert.equal(ui.input.disabled, false);
+    assert.equal(ui.dom.window.document.getElementById('toast').hidden, true);
+    assert.equal(ui.dom.window.document.getElementById('inline-status').hidden, true);
+  } finally { ui.dom.window.close(); }
+});
+
+test('late recovery retains uncertainty for historical, failed, pending, duplicate and unrelated messages', async () => {
+  const message = '동일한 내용';
+  const cases = [
+    { rows: [sentRow(message, { id: '100' })] },
+    { rows: [sentRow(message, { own: false })] },
+    { rows: [sentRow(message, { time: '2020-01-01T00:00:00Z' })] },
+    { rows: [sentRow(message, { pending: true })] },
+    { rows: [sentRow(message, { failed: true })] },
+    { rows: [sentRow(message), sentRow(message, { id: 'another-new-message' })] },
+    { rows: [sentRow('다른 내용')] },
+    { rows: [sentRow(message)], draftText: message },
+    { rows: [sentRow(message)], hasDialog: true }
+  ];
+  for (const changes of cases) {
+    const ui = makeUI();
+    try {
+      ui.type(message); ui.submit();
+      ui.sends[0].resolve(delayedReceipt(ui, message)); await tick();
+      ui.callbacks.snapshot({ ...snapshot(), ...changes });
+      assert.equal(ui.input.value, message, JSON.stringify(changes));
+      assert.equal(ui.input.disabled, true, JSON.stringify(changes));
+      assert.equal(ui.sends.length, 1);
+    } finally { ui.dom.window.close(); }
+  }
+});
+
+test('late recovery requires a submitted receipt for exactly the original request', async () => {
+  for (const change of [result => { result.submitted = false; }, result => { result.receipt.route = routeB; }, result => { result.receipt.text = '다른 전송'; }]) {
+    const ui = makeUI();
+    try {
+      const message = '확실하지 않은 전송';
+      ui.type(message); ui.submit();
+      const result = delayedReceipt(ui, message); change(result);
+      ui.sends[0].resolve(result); await tick();
+      ui.callbacks.snapshot({ ...snapshot(), rows: [sentRow(message)] });
+      assert.equal(ui.input.value, message);
+      assert.equal(ui.input.disabled, true);
+    } finally { ui.dom.window.close(); }
+  }
+});
+
+test('late recovery preserves a revised draft and never erases the active draft in another conversation', async () => {
+  const ui = makeUI();
+  try {
+    const message = '원래 보낸 내용';
+    ui.type(message); ui.submit();
+    ui.sends[0].resolve(delayedReceipt(ui, message)); await tick();
+    ui.callbacks.snapshot(snapshot(routeB));
+    ui.type('다른 대화에 보관할 초안');
+    ui.callbacks.snapshot({ ...snapshot(routeB), rows: [sentRow(message)] });
+    assert.equal(ui.input.value, '다른 대화에 보관할 초안');
+    ui.callbacks.snapshot(snapshot());
+    ui.type('수정한 초안'); ui.type(message);
+    ui.callbacks.snapshot({ ...snapshot(), rows: [sentRow(message)] });
+    assert.equal(ui.input.value, message, 'editing away and back does not restore ownership of the submitted draft');
+    assert.equal(ui.input.disabled, false);
+    ui.callbacks.snapshot(snapshot(routeB));
+    assert.equal(ui.input.value, '다른 대화에 보관할 초안');
+  } finally { ui.dom.window.close(); }
+});
+
+test('reset and manual acknowledgement discard late recovery so it cannot clear a newer draft', async () => {
+  for (const reset of [true, false]) {
+    const ui = makeUI();
+    try {
+      const message = '반복해서 보낼 내용';
+      ui.type(message); ui.submit();
+      ui.sends[0].resolve(delayedReceipt(ui, message)); await tick();
+      if (reset) ui.callbacks.snapshot({ ...snapshot(), reset: true });
+      else ui.dom.window.document.querySelector('.acknowledge').click();
+      ui.type(message);
+      ui.callbacks.snapshot({ ...snapshot(), rows: [sentRow(message)] });
+      assert.equal(ui.input.value, message);
+      assert.equal(ui.input.disabled, false);
+      assert.equal(ui.sends.length, 1);
+    } finally { ui.dom.window.close(); }
+  }
+});
+
+test('late recovery expires instead of matching a much later same-text message', async () => {
+  const ui = makeUI();
+  try {
+    const message = '나중에 다시 쓴 내용', startedAt = Date.now();
+    ui.type(message); ui.submit();
+    ui.sends[0].resolve(delayedReceipt(ui, message, startedAt)); await tick();
+    ui.dom.window.Date.now = () => startedAt + 60001;
+    ui.callbacks.snapshot({ ...snapshot(), rows: [sentRow(message, { time: new Date(startedAt + 60001).toISOString() })] });
+    assert.equal(ui.input.value, message);
+    assert.equal(ui.input.disabled, true);
+    assert.doesNotMatch(ui.dom.window.document.getElementById('inline-status').textContent, /자동으로/);
+  } finally { ui.dom.window.close(); }
+});
+
+test('a confirmed late receipt waits for the native draft to clear and ignores a different pending-message receipt', async () => {
+  const ui = makeUI();
+  try {
+    const message = '늦게 비워진 초안';
+    ui.type(message); ui.submit();
+    const result = delayedReceipt(ui, message);
+    result.receipt.pendingIds = ['local-pending'];
+    result.receipt.unrelatedConfirmedIds = ['unrelated-new-message'];
+    ui.sends[0].resolve(result); await tick();
+    ui.callbacks.snapshot({ ...snapshot(), rows: [sentRow(message, { id: 'unrelated-new-message' })] });
+    assert.equal(ui.input.disabled, true);
+    ui.callbacks.snapshot({ ...snapshot(), rows: [sentRow(message)], draftText: message });
+    assert.equal(ui.input.disabled, true);
+    ui.callbacks.snapshot({ ...snapshot(), rows: [sentRow(message)] });
+    assert.equal(ui.input.value, '');
+    assert.equal(ui.input.disabled, false);
+  } finally { ui.dom.window.close(); }
+});
+
 test('a late send receipt cannot erase a draft in another conversation', async () => {
   const ui = makeUI();
   try {

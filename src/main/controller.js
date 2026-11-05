@@ -108,7 +108,7 @@ function createController({ window, createGuest, guestSession, dialog, openExter
     return entry.promise;
   }
   async function poll() {
-    if (!sameGuest(guest) || operation?.kind === 'clear') return;
+    if (!sameGuest(guest) || operation?.kind === 'clear' || operation?.kind === 'send') return;
     try { await readSnapshot(); } catch { /* A failed read disables composing; the next poll may recover. */ }
   }
   function periodicPoll() {
@@ -219,8 +219,27 @@ function createController({ window, createGuest, guestSession, dialog, openExter
     const target = guest, epoch = guestEpoch, document = documentEpoch;
     const current = () => operationCurrent(token, target, epoch) && documentEpoch === document;
     try {
+      const readSendSnapshot = async () => {
+        // Finish an earlier full read before the first send observation. While
+        // sending, polling yields to these smaller, current-room-only reads.
+        if (pendingRead) await pendingRead.promise;
+        if (!current()) throw new StaleGuestError();
+        const raw = await invoke(target.webContents, 'sendSnapshot', [], current);
+        const path = new URL(target.webContents.getURL()).pathname.replace(/\/$/, '');
+        if (!current() || raw?.route !== path) throw new StaleGuestError();
+        const observation = normalizeSnapshot(raw);
+        const sameConversation = snapshot?.route === observation.route &&
+          !(accountId && observation.accountId && accountId !== observation.accountId);
+        const value = sameConversation ? { ...observation, title: snapshot.title, guildName: snapshot.guildName,
+          channels: snapshot.channels, guilds: snapshot.guilds } : observation;
+        applySnapshot(value);
+        if (!current()) throw new StaleGuestError();
+        return value;
+      };
       return await transmitMessage({ request: { text: request.text, route: request.route }, wc: target.webContents, readSnapshot,
+        readSendSnapshot,
         callAdapter: (method, ...args) => invoke(target.webContents, method, args, current), isCurrent: current,
+        isFocused: () => window.isFocused() && target.webContents.isFocused(),
         focus: () => { if (!current()) throw new StaleGuestError(); window.focus(); target.webContents.focus(); } });
     } catch { return { ok: false, uncertain: true, error: '전송 결과를 확인하지 못했습니다. 원래 화면에서 확인한 뒤 다시 보내세요.' }; }
     finally {

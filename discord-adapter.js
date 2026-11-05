@@ -1,6 +1,6 @@
 /* Read only the rendered Discord UI. This adapter never accesses tokens,
- * internal stores or APIs. User-triggered UI navigation and composer focus
- * are its only mutations; the host owns deliberate, manual message sends. */
+ * internal stores or APIs. Its mutations are user-triggered UI navigation,
+ * composer focus and one guarded submission of the host-inserted draft. */
 (() => {
   'use strict';
   const ROW = 'li[id^="chat-messages-"], [data-list-item-id^="chat-messages___"]';
@@ -187,19 +187,58 @@
     return [...found.values()].slice(0, 12);
   }
 
+  function messageAuthor(row) {
+    const isAuthorElement = element => !element.closest('[id^="message-content-"], [class*="repliedMessage"], [class*="reactions_"]');
+    const username = nodes('[id^="message-username-"], h3 [class*="username_"]', row).find(isAuthorElement);
+    const evidence = nodes('[data-author-id], img[class*="avatar_"][src*="/avatars/"]', row).filter(element => isAuthorElement(element) && !hidden(element));
+    if (row.hasAttribute('data-author-id')) evidence.push(row);
+    const ids = new Set();
+    for (const element of evidence) {
+      const explicit = element.getAttribute('data-author-id');
+      const avatar = (element.getAttribute('src') || '').match(/\/avatars\/(\d+)\//)?.[1];
+      if (/^\d+$/.test(explicit || '')) ids.add(explicit);
+      if (avatar) ids.add(avatar);
+    }
+    return { username, name: textOf(username, { exclude: '[class*="badge"], [class*="Badge"], [class*="clan"], [class*="Clan"], svg' }),
+      id: ids.size === 1 ? ids.values().next().value : '', conflicting: ids.size > 1 };
+  }
+
   function messages() {
     const self = identity();
     const channelId = route().split('/')[3];
     let previousAuthor = '';
     let previousAuthorId = '';
-    return rowElements().filter(row => !channelId || !messageChannelId(row) || messageChannelId(row) === channelId).map((row, index) => {
+    const rows = rowElements().filter(row => !channelId || !messageChannelId(row) || messageChannelId(row) === channelId);
+    const rowSet = new Set(rows);
+    const authors = new WeakMap();
+    const authorFor = row => {
+      if (!authors.has(row)) authors.set(row, messageAuthor(row));
+      return authors.get(row);
+    };
+    return rows.map((row, index) => {
       const ownElement = selector => nodes(selector, row).find(element => !element.closest('[class*="repliedMessage"], [class*="reactions_"]'));
       const content = ownElement('[id^="message-content-"]');
-      const username = ownElement('[id^="message-username-"], h3 [class*="username_"]');
-      const avatar = ownElement('img[class*="avatar_"][src*="/avatars/"]');
-      const ownId = (avatar?.getAttribute('src') || '').match(/\/avatars\/(\d+)\//)?.[1] || '';
-      if (username) { previousAuthor = textOf(username, { exclude: '[class*="badge"], [class*="Badge"], [class*="clan"], [class*="Clan"], svg' }); previousAuthorId = ownId; }
-      else if (ownId) previousAuthorId = ownId;
+      let authorDetails = authorFor(row);
+      if (!authorDetails.username && !authorDetails.id && !authorDetails.conflicting) {
+        const labelled = row.getAttribute('aria-labelledby') || row.querySelector('[aria-labelledby*="message-username-"]')?.getAttribute('aria-labelledby') || '';
+        const authorLabels = labelled.split(/\s+/).filter(id => id.startsWith('message-username-'));
+        if (authorLabels.length) {
+          // Grouped/compact rows can explicitly reference their author header.
+          // Trust only a visible header in this same rendered channel, never a
+          // matching display name or an old hidden panel.
+          const target = authorLabels.length === 1 ? document.getElementById(authorLabels[0]) : null;
+          const owner = target?.closest(ROW);
+          authorDetails = target && !hidden(target) && rowSet.has(owner) && authorFor(owner).username === target
+            ? authorFor(owner) : { name: '', id: '', conflicting: true };
+        }
+      }
+      if (authorDetails.username || authorDetails.conflicting) {
+        previousAuthor = authorDetails.name;
+        previousAuthorId = authorDetails.id;
+      } else if (authorDetails.id) {
+        if (authorDetails.id !== previousAuthorId) previousAuthor = '';
+        previousAuthorId = authorDetails.id;
+      }
       const author = previousAuthor;
       const timeElement = ownElement('time');
       const text = textOf(content, { multiline: true });
@@ -213,11 +252,28 @@
     }).filter(Boolean);
   }
 
-  function snapshot() {
+  function withReadContext(read) {
     const previousContext = readContext;
     readContext = { visibility: new WeakMap(), rows: null, identity: null };
-    try { return readSnapshot(); }
+    try { return read(); }
     finally { readContext = previousContext; }
+  }
+
+  function snapshot() { return withReadContext(readSnapshot); }
+
+  function sendSnapshot() {
+    return withReadContext(() => {
+      const currentRoute = route();
+      const composer = getComposer();
+      const ready = routeReady();
+      const hasDialog = dialogs().length > 0;
+      const loggedIn = CHANNEL_ROUTE.test(currentRoute) && !!(composer || rowElements().length ||
+        document.querySelector('[data-list-id="chat-messages"], [class*="privateChannels_"]'));
+      return { loggedIn, accountId: loggedIn ? identity().id : '', route: currentRoute,
+        rows: loggedIn && CHAT_ROUTE.test(currentRoute) && ready ? messages() : [],
+        canSend: loggedIn && CHAT_ROUTE.test(currentRoute) && ready && !!composer && !hasDialog,
+        hasDialog, draftText: draftText(composer), routeReady: ready };
+    });
   }
 
   function readSnapshot() {
@@ -253,7 +309,7 @@
     const ready = routeReady();
     const canSend = CHAT_ROUTE.test(currentRoute) && ready && !!composer && !hasDialog;
     const focused = !!composer && (document.activeElement === composer || composer.contains(document.activeElement));
-    return { ok: currentRoute === expectedRoute && canSend, text: draftText(composer), route: currentRoute, canSend, hasDialog, focused, routeReady: ready };
+    return { ok: currentRoute === expectedRoute && canSend, text: draftText(composer), route: currentRoute, canSend, hasDialog, focused, documentFocused: document.hasFocus(), routeReady: ready };
   }
 
   function focusComposer(expectedRoute) {
@@ -267,6 +323,51 @@
     const after = composerState(expectedRoute);
     const focused = after.ok && after.focused && getComposer() === composer;
     return { ok: focused && !after.text, draftText: after.text, route: after.route, focused };
+  }
+
+  function submitComposer(expectedRoute, expectedText) {
+    const rejected = error => ({ ok: false, dispatched: false, error });
+    if (typeof expectedRoute !== 'string' || !CHAT_ROUTE.test(expectedRoute) ||
+      typeof expectedText !== 'string' || !expectedText.trim() || expectedText.length > 2000) {
+      return rejected('전송할 대화와 메시지를 확인해주세요.');
+    }
+    const normalizeDraft = value => String(value || '').replace(/\r\n/g, '\n').replace(/\u00a0/g, ' ').replace(/[\u200b\uFEFF]/g, '').trim();
+    const state = composerState(expectedRoute);
+    if (!state.ok || !state.focused || normalizeDraft(state.text) !== normalizeDraft(expectedText)) {
+      return rejected('입력 상태가 변경되어 전송하지 않았습니다. 작성 내용을 확인해주세요.');
+    }
+    const composer = getComposer();
+    if (!composer || !(document.activeElement === composer || composer.contains(document.activeElement))) {
+      return rejected('입력창이 변경되어 전송하지 않았습니다.');
+    }
+    let dispatched = false;
+    try {
+      // Submit through the rendered editor's bubbling keyboard handler. The
+      // offscreen native view can lose OS-routed key events despite reporting
+      // focus. This is the only Enter path, never a fallback or automatic retry.
+      const options = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true, composed: true };
+      const down = new KeyboardEvent('keydown', options);
+      const up = new KeyboardEvent('keyup', options);
+      dispatched = true;
+      composer.dispatchEvent(down);
+      if (!down.defaultPrevented) {
+        // Some editor versions submit on keypress. Only continue the same key
+        // sequence if keydown left this exact draft/editor ready; it may have
+        // already submitted or synchronously changed the route without calling
+        // preventDefault. A handled keydown must never produce a second submit.
+        const afterDown = composerState(expectedRoute);
+        if (afterDown.ok && afterDown.focused && getComposer() === composer &&
+          normalizeDraft(afterDown.text) === normalizeDraft(expectedText)) {
+          composer.dispatchEvent(new KeyboardEvent('keypress', { ...options, charCode: 13 }));
+        }
+      }
+      composer.dispatchEvent(up);
+      // Dispatch is not delivery confirmation. The host still requires a new
+      // own message in the rendered conversation and a cleared native draft.
+      return { ok: true, dispatched: true };
+    } catch {
+      return { ok: false, dispatched, error: '입력창의 전송 결과를 확인하지 못했습니다.' };
+    }
   }
 
   function scroll(direction, expectedRoute) {
@@ -284,5 +385,5 @@
   }
 
   // No listeners or timers are retained, making repeated injection idempotent.
-  window.__vdcAdapter = { snapshot, open, focusComposer, composerState, scroll };
+  window.__vdcAdapter = { snapshot, sendSnapshot, open, focusComposer, composerState, submitComposer, scroll };
 })();
