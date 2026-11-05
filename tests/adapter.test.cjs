@@ -272,8 +272,8 @@ test('guarded submission supports keypress editors without duplicating a keydown
   }
 });
 
-test('a keydown route or dialog transition cannot forward keypress into the changed editor', () => {
-  for (const transition of ['route','dialog']) {
+test('a keydown route, dialog or document-focus transition cannot forward keypress into the changed editor', () => {
+  for (const transition of ['route','dialog','document-focus']) {
     const dom=makePage();
     try {
       const {document}=dom.window;
@@ -283,14 +283,36 @@ test('a keydown route or dialog transition cannot forward keypress into the chan
       let keypresses=0;
       document.addEventListener('keydown',()=>{
         if (transition==='route') dom.window.history.pushState({},'','/channels/100/201');
-        else document.body.insertAdjacentHTML('beforeend','<div role="dialog">확인</div>');
+        else if (transition==='dialog') document.body.insertAdjacentHTML('beforeend','<div role="dialog">확인</div>');
+        else document.hasFocus=()=>false;
       });
       document.addEventListener('keypress',()=>keypresses++);
       assert.equal(api.submitComposer(route,'전송').dispatched,true);
       assert.equal(keypresses,0);
       assert.equal(composer.textContent,'전송');
+      if (transition==='document-focus') assert.strictEqual(document.activeElement,composer,'native blur can leave the editor selected');
     } finally {dom.window.close();}
   }
+});
+
+test('submission rechecks document focus immediately before delivering Enter', () => {
+  const dom=makePage();
+  try {
+    const {document}=dom.window;
+    const api=dom.window.__vdcAdapter;
+    const composer=document.querySelector('[data-slate-editor]');
+    api.focusComposer(route); composer.textContent='draft';
+    assert.equal(api.composerState(route).documentFocused,true,'the host can observe focus before its next IPC call');
+    document.hasFocus=()=>false;
+    assert.strictEqual(document.activeElement,composer,'losing native focus does not always change activeElement');
+    const events=[];
+    for (const type of ['keydown','keypress','keyup']) document.addEventListener(type,event=>events.push(event.type));
+    const result=api.submitComposer(route,'draft');
+    assert.equal(result.ok,false);
+    assert.equal(result.dispatched,false);
+    assert.deepEqual(events,[]);
+    assert.equal(composer.textContent,'draft');
+  } finally {dom.window.close();}
 });
 
 test('guarded submission rejects changed drafts, routes, focus, dialogs and ambiguous editors before Enter', () => {

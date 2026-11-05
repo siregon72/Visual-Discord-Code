@@ -1,7 +1,7 @@
 {
   "name": "visual-discord-code",
   "productName": "Visual Discord Code",
-  "version": "0.3.10",
+  "version": "0.3.11",
   "description": "A standalone editor-style window for Discord Web",
   "private": true,
   "main": "main.js",

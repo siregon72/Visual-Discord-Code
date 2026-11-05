@@ -338,7 +338,7 @@
     }
     const normalizeDraft = value => String(value || '').replace(/\r\n/g, '\n').replace(/\u00a0/g, ' ').replace(/[\u200b\uFEFF]/g, '').trim();
     const state = composerState(expectedRoute);
-    if (!state.ok || !state.focused || normalizeDraft(state.text) !== normalizeDraft(expectedText)) {
+    if (!state.ok || !state.focused || state.documentFocused === false || normalizeDraft(state.text) !== normalizeDraft(expectedText)) {
       return rejected('입력 상태가 변경되어 전송하지 않았습니다. 작성 내용을 확인해주세요.');
     }
     const composer = getComposer();
@@ -361,7 +361,7 @@
         // already submitted or synchronously changed the route without calling
         // preventDefault. A handled keydown must never produce a second submit.
         const afterDown = composerState(expectedRoute);
-        if (afterDown.ok && afterDown.focused && getComposer() === composer &&
+        if (afterDown.ok && afterDown.focused && afterDown.documentFocused !== false && getComposer() === composer &&
           normalizeDraft(afterDown.text) === normalizeDraft(expectedText)) {
           composer.dispatchEvent(new KeyboardEvent('keypress', { ...options, charCode: 13 }));
         }
