@@ -10,6 +10,9 @@
     "test": "node --test tests/*.test.cjs",
     "test:desktop": "node scripts/test-desktop.cjs",
     "dist": "npm run validate && electron-builder --win zip --x64",
+    "dist:mac": "node scripts/build-mac.cjs",
+    "dist:mac:friend": "node scripts/build-mac.cjs --friend",
+    "dist:mac:repair": "node scripts/package-mac-repair.cjs",
     "pack": "npm run validate && electron-builder --win --dir --x64",
     "check": "node scripts/check.cjs",
     "validate": "npm run check && npm test"
